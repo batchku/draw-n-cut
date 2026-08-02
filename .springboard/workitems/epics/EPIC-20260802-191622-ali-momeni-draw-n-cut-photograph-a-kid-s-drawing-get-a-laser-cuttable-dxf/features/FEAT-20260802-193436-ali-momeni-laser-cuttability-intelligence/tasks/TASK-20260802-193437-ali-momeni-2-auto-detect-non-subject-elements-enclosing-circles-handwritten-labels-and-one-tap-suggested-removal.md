@@ -14,3 +14,13 @@ depends_on:
 # Summary
 
 Complete Auto-detect non-subject elements (enclosing circles, handwritten labels) and one-tap suggested removal.
+
+# Notes
+
+- Non-subject elements are opportunistic, per-image detections — never assumptions.
+  Enclosing circles and labels appear in some source drawings (see Fixtures/) and
+  not others; the detector must score each traced element generically
+  (subject-connected vs stray) rather than hard-code "find the big circle".
+- Detection only ever *suggests*; nothing is auto-removed. The generic tap-to-delete
+  removal UI (TASK-20260802-193438-ali-momeni) is the universal fallback and must not
+  depend on any detector output.
