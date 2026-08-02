@@ -1,0 +1,68 @@
+import SwiftUI
+
+/// Pick a physical size, write the DXF, share it. Everything engraves for
+/// now — the cut outline and per-path overrides come with SAM integration.
+struct ExportSheet: View {
+    let session: TraceSession
+
+    @State private var widthMM: Double = 100
+    @State private var exportedURL: URL?
+    @State private var exportError: String?
+
+    private let presets: [Double] = [60, 100, 150, 200]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Physical size") {
+                    HStack {
+                        Slider(value: $widthMM, in: 30...300, step: 5) {
+                            Text("Width")
+                        }
+                        Text("\(Int(widthMM)) mm")
+                            .monospacedDigit()
+                            .frame(width: 70, alignment: .trailing)
+                    }
+                    Picker("Preset", selection: $widthMM) {
+                        ForEach(presets, id: \.self) { preset in
+                            Text("\(Int(preset)) mm").tag(preset)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    let size = DXFExportBuilder.sizeMM(of: session.visible.map(\.polyline), widthMM: widthMM)
+                    LabeledContent("Output", value: "\(Int(size.width)) × \(Int(size.height)) mm")
+                }
+
+                Section {
+                    if let exportedURL {
+                        ShareLink(item: exportedURL) {
+                            Label("Share \(exportedURL.lastPathComponent)", systemImage: "square.and.arrow.up")
+                        }
+                        Text("Saved to this drawing's local library.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Button {
+                            do {
+                                exportedURL = try session.exportDXF(widthMM: widthMM)
+                            } catch {
+                                exportError = error.localizedDescription
+                            }
+                        } label: {
+                            Label("Create DXF", systemImage: "doc.badge.gearshape")
+                        }
+                    }
+                    if let exportError {
+                        Text(exportError).font(.footnote).foregroundStyle(.red)
+                    }
+                } footer: {
+                    Text("DXF layers: ENGRAVE for all traced lines. The CUT outline arrives with subject-outline support.")
+                }
+            }
+            .navigationTitle("Export DXF")
+            .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: widthMM) { exportedURL = nil }
+        }
+    }
+}

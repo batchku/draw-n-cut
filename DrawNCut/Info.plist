@@ -26,6 +26,8 @@
 	<string>Draw'n'Cut can import existing photos of drawings from your photo library.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

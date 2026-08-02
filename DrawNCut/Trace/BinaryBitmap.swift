@@ -31,13 +31,24 @@ struct BinaryBitmap {
 
     // MARK: - From image
 
+    /// The pixel size tracing will use for an image: downscaled so the long
+    /// edge is at most `maxDimension`. Anything mapping external coordinates
+    /// (Vision rects, taps) into trace space must use this.
+    static func traceSize(for cgImage: CGImage, maxDimension: Int = 2000) -> CGSize {
+        let scale = min(1.0, Double(maxDimension) / Double(max(cgImage.width, cgImage.height)))
+        return CGSize(
+            width: max(1, Int(Double(cgImage.width) * scale)),
+            height: max(1, Int(Double(cgImage.height) * scale))
+        )
+    }
+
     /// Binarizes a photo/scan: grayscale render, then global Otsu threshold.
     /// Downscales so the long edge is at most `maxDimension` — trace quality
     /// doesn't improve past that, and every later stage is O(pixels).
     init?(cgImage: CGImage, maxDimension: Int = 2000) {
-        let scale = min(1.0, Double(maxDimension) / Double(max(cgImage.width, cgImage.height)))
-        let w = max(1, Int(Double(cgImage.width) * scale))
-        let h = max(1, Int(Double(cgImage.height) * scale))
+        let size = Self.traceSize(for: cgImage, maxDimension: maxDimension)
+        let w = Int(size.width)
+        let h = Int(size.height)
 
         var gray = [UInt8](repeating: 0, count: w * h)
         guard let context = CGContext(

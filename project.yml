@@ -9,6 +9,14 @@ settings:
     SWIFT_VERSION: "5.10"
     TARGETED_DEVICE_FAMILY: "1"
     GENERATE_INFOPLIST_FILE: false
+  configs:
+    # The trace pipeline is heavy numeric Swift; unoptimized it takes tens of
+    # seconds per page. Keep -O in Debug so on-device testing feels real.
+    debug:
+      SWIFT_OPTIMIZATION_LEVEL: "-O"
+      # Single self-contained binary; the debug-dylib split breaks
+      # command-line simctl installs when products go stale.
+      ENABLE_DEBUG_DYLIB: "NO"
 targets:
   DrawNCut:
     type: application
@@ -22,6 +30,7 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
+        UIRequiresFullScreen: true
         NSCameraUsageDescription: Draw'n'Cut uses the camera to photograph drawings so they can be traced and laser cut.
         NSPhotoLibraryUsageDescription: Draw'n'Cut can import existing photos of drawings from your photo library.
     settings:

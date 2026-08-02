@@ -46,7 +46,7 @@ struct LibraryView: View {
         List {
             ForEach(store.projects) { project in
                 Button {
-                    path.append(.refineMask(projectID: project.id))
+                    path.append(.trace(projectID: project.id))
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(project.title)

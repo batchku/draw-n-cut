@@ -15,11 +15,14 @@ struct RootView: View {
     var body: some View {
         NavigationStack(path: $path) {
             LibraryView(path: $path)
-                .onAppear { try? store.loadAll() }
+                .onAppear {
+                    try? store.loadAll()
+                    openDemoImageIfRequested()
+                }
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .capture:
-                        CapturePlaceholderView(path: $path)
+                        CaptureView(path: $path)
                     case .refineMask(let projectID):
                         StagePlaceholderView(
                             title: "Refine Outline",
@@ -29,25 +32,30 @@ struct RootView: View {
                             path: $path
                         )
                     case .trace(let projectID):
-                        StagePlaceholderView(
-                            title: "Trace Details",
-                            systemImage: "slider.horizontal.below.square.and.square.filled",
-                            detail: "One Detail slider controls the inner trace. Every kept setting becomes a version.",
-                            next: .export(projectID: projectID),
-                            path: $path
-                        )
-                    case .export:
-                        StagePlaceholderView(
-                            title: "Export DXF",
-                            systemImage: "square.and.arrow.up",
-                            detail: "Toggle cut vs engrave per path, then save locally and to Google Drive.",
-                            next: nil,
-                            path: $path
-                        )
+                        TraceView(path: $path, projectID: projectID)
+                    case .export(let projectID):
+                        TraceView(path: $path, projectID: projectID)
                     }
                 }
         }
         .environment(store)
+    }
+
+    /// Test/demo hook: `DEMO_IMAGE=<path>` in the launch environment creates
+    /// a project from that image and jumps straight to the trace screen.
+    private func openDemoImageIfRequested() {
+        #if DEBUG
+        guard let demoPath = ProcessInfo.processInfo.environment["DEMO_IMAGE"],
+              path.isEmpty else { return }
+        do {
+            let data = try Data(contentsOf: URL(filePath: demoPath))
+            let project = try store.create(title: "Demo Drawing")
+            try data.write(to: store.originalImageURL(for: project), options: .atomic)
+            path = [.trace(projectID: project.id)]
+        } catch {
+            print("demo image failed: \(error)")
+        }
+        #endif
     }
 }
 
