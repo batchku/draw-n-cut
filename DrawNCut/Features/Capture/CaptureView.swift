@@ -77,7 +77,7 @@ struct CaptureView: View {
 
     private func start(with image: UIImage) {
         do {
-            let normalized = image.orientationNormalized()
+            let normalized = image.normalizedForTrace()
             guard let jpeg = normalized.jpegData(compressionQuality: 0.9) else {
                 importError = "Couldn't read that photo."
                 return
@@ -92,12 +92,21 @@ struct CaptureView: View {
 }
 
 extension UIImage {
-    /// Bakes EXIF orientation into the pixels so `cgImage` sees the photo the
-    /// way the user did.
-    func orientationNormalized() -> UIImage {
-        guard imageOrientation != .up else { return self }
-        return UIGraphicsImageRenderer(size: size).image { _ in
-            draw(in: CGRect(origin: .zero, size: size))
+    /// Bakes EXIF orientation into the pixels and caps resolution for the
+    /// trace pipeline. The renderer format must pin scale to 1: the default
+    /// is the device's screen scale, which triples a camera photo's pixel
+    /// dimensions (12MP becomes a ~110MP allocation that fails on-device and
+    /// yields a black image).
+    func normalizedForTrace(maxDimension: CGFloat = 2600) -> UIImage {
+        let longEdge = max(size.width, size.height)
+        let factor = min(1, maxDimension / max(1, longEdge))
+        let target = CGSize(width: (size.width * factor).rounded(.down),
+                            height: (size.height * factor).rounded(.down))
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: target, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: target))
         }
     }
 }

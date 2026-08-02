@@ -48,8 +48,16 @@ final class TraceSession {
 
     func load() async {
         let url = store.originalImageURL(for: project)
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
+        // Bounded thumbnail decode: never materialize the full-resolution
+        // photo in memory — an oversized stored image (or a future 48MP
+        // camera) must not be able to run the app into the jetsam limit.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 2000,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return }
         image = cgImage
         textRegions = []
         scheduleRetrace(debounce: false)

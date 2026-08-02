@@ -44,7 +44,15 @@ struct TraceView: View {
                 }
                 .overlay {
                     if session.isTracing {
-                        ProgressView().controlSize(.large)
+                        ProgressView("Tracing…")
+                            .padding(20)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    } else if session.result != nil && session.visible.isEmpty {
+                        ContentUnavailableView {
+                            Label("Nothing to Trace", systemImage: "eye.slash")
+                        } description: {
+                            Text("No drawing was found in this photo. Retake it with more light, filling the frame with the page.")
+                        }
                     }
                 }
 
