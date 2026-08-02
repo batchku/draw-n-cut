@@ -1,0 +1,32 @@
+name: DrawNCut
+options:
+  bundleIdPrefix: com.alimomeni
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    TARGETED_DEVICE_FAMILY: "1"
+    GENERATE_INFOPLIST_FILE: false
+targets:
+  DrawNCut:
+    type: application
+    platform: iOS
+    sources:
+      - DrawNCut
+    info:
+      path: DrawNCut/Info.plist
+      properties:
+        CFBundleDisplayName: Draw'n'Cut
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: Draw'n'Cut uses the camera to photograph drawings so they can be traced and laser cut.
+        NSPhotoLibraryUsageDescription: Draw'n'Cut can import existing photos of drawings from your photo library.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.alimomeni.drawncut
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
