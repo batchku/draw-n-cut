@@ -2,8 +2,8 @@ import CoreGraphics
 import Foundation
 
 /// A 1-bit ink bitmap: `true` means ink. The raster substrate for tracing —
-/// built from a photo by grayscale conversion + Otsu thresholding, then carved
-/// into connected components that become traced elements.
+/// built from a photo by grayscale conversion + local adaptive thresholding,
+/// then carved into connected components that become traced elements.
 struct BinaryBitmap {
     let width: Int
     let height: Int
@@ -42,7 +42,12 @@ struct BinaryBitmap {
         )
     }
 
-    /// Binarizes a photo/scan: grayscale render, then global Otsu threshold.
+    /// Binarizes a photo/scan: grayscale render, then a local adaptive
+    /// threshold — a pixel is ink when it is dark relative to its own
+    /// window's statistics. Pen marks are locally dark; tables, shadows, and
+    /// lighting gradients change too gradually to qualify. (A global
+    /// threshold fails on handheld photos: paper on a dark table splits
+    /// paper-vs-table and the whole table becomes "ink".)
     /// Downscales so the long edge is at most `maxDimension` — trace quality
     /// doesn't improve past that, and every later stage is O(pixels).
     init?(cgImage: CGImage, maxDimension: Int = 2000) {
@@ -61,14 +66,298 @@ struct BinaryBitmap {
         context.interpolationQuality = .high
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
 
-        var histogram = [Int](repeating: 0, count: 256)
-        for value in gray { histogram[Int(value)] += 1 }
-        let threshold = Self.otsuThreshold(histogram: histogram, total: w * h)
-
         self.width = w
         self.height = h
-        // Ink is darker than the threshold (dark marks on light paper).
-        self.pixels = gray.map { Int($0) < threshold }
+
+        // Window ≈ 1/14 of the long edge: wider than any pen stroke (so a
+        // stroke never fills its own window), narrower than lighting changes.
+        // The contrast gate is the minimum darkness a mark needs against its
+        // surroundings; 25 gray levels keeps soft pencil while rejecting
+        // sensor noise and shadow gradients.
+        let window = max(15, max(w, h) / 14)
+        var ink = Self.locallyDarkMask(gray: gray, width: w, height: h, window: window, minContrast: 25)
+
+        // A handheld photo has content only on the paper; whatever the local
+        // threshold picked up around it (the paper's own contrast edge, table
+        // texture) is garbage.
+        if let paper = Self.paperRegion(gray: gray, width: w, height: h, margin: window / 2) {
+            for i in ink.indices where !paper[i] { ink[i] = false }
+        }
+
+        Self.fillDarkHoles(ink: &ink, gray: gray, width: w, height: h)
+        self.pixels = ink
+    }
+
+    /// Pixels darker than a cut 60% of the way from the local window mean
+    /// (≈ the background, since marks are thin) down to the darkest value in
+    /// the window (≈ the pen). That cut approximates what a global Otsu
+    /// picks on a clean scan — the window minimum sits below the ink class
+    /// mean, so a plain 50% midpoint runs stricter than Otsu and perforates
+    /// faint stroke segments. Computing it per-window instead of globally is
+    /// what survives arbitrary backgrounds. Windows whose mean-to-minimum
+    /// contrast stays under `minContrast` hold no mark at all and yield
+    /// nothing.
+    /// The mean comes from a summed-area table and the minimum from a
+    /// separable sliding-window pass, so the whole mask is O(pixels).
+    /// Accumulators are Int64: full-resolution gray sums overflow Int32.
+    private static func locallyDarkMask(
+        gray: [UInt8], width w: Int, height h: Int, window: Int, minContrast: Int64
+    ) -> [Bool] {
+        var integral = [Int64](repeating: 0, count: (w + 1) * (h + 1))
+        for y in 0..<h {
+            var rowSum: Int64 = 0
+            let row = (y + 1) * (w + 1)
+            let previousRow = y * (w + 1)
+            for x in 0..<w {
+                rowSum += Int64(gray[y * w + x])
+                integral[row + x + 1] = integral[previousRow + x + 1] + rowSum
+            }
+        }
+
+        let radius = window / 2
+        let minimum = slidingMinimum(gray, width: w, height: h, radius: radius)
+
+        var ink = [Bool](repeating: false, count: w * h)
+        for y in 0..<h {
+            let y0 = max(0, y - radius), y1 = min(h - 1, y + radius)
+            let top = y0 * (w + 1), bottom = (y1 + 1) * (w + 1)
+            for x in 0..<w {
+                let x0 = max(0, x - radius), x1 = min(w - 1, x + radius)
+                let count = Int64((x1 - x0 + 1) * (y1 - y0 + 1))
+                let sum = integral[bottom + x1 + 1] - integral[top + x1 + 1]
+                    - integral[bottom + x0] + integral[top + x0]
+                let darkest = Int64(minimum[y * w + x])
+                guard sum - darkest * count >= minContrast * count else { continue }
+                if 10 * (Int64(gray[y * w + x]) - darkest) * count < 6 * (sum - darkest * count) {
+                    ink[y * w + x] = true
+                }
+            }
+        }
+        return ink
+    }
+
+    /// Windowed minimum, one dimension at a time with a monotonic deque —
+    /// O(pixels) regardless of the window size.
+    private static func slidingMinimum(
+        _ values: [UInt8], width w: Int, height h: Int, radius: Int
+    ) -> [UInt8] {
+        func pass(_ input: [UInt8], length: Int, lines: Int, stride: Int, lineStride: Int) -> [UInt8] {
+            var output = input
+            var deque = [Int](repeating: 0, count: length)
+            for line in 0..<lines {
+                let base = line * lineStride
+                var head = 0, tail = 0
+                for i in 0..<(length + radius) {
+                    if i < length {
+                        let value = input[base + i * stride]
+                        while tail > head && input[base + deque[tail - 1] * stride] >= value {
+                            tail -= 1
+                        }
+                        deque[tail] = i
+                        tail += 1
+                    }
+                    let out = i - radius
+                    if out >= 0 {
+                        while deque[head] < out - radius { head += 1 }
+                        output[base + out * stride] = input[base + deque[head] * stride]
+                    }
+                }
+            }
+            return output
+        }
+        let rows = pass(values, length: w, lines: h, stride: 1, lineStride: w)
+        return pass(rows, length: h, lines: w, stride: w, lineStride: 1)
+    }
+
+    /// The single dominant bright region — the paper in a handheld photo —
+    /// eroded inward by `margin`, or nil when the frame is (nearly) all
+    /// paper as a flatbed scan is, so scans keep their exact behavior.
+    /// The erosion matters: within half a window of the paper's edge the
+    /// step to the table dominates local statistics, so the paper's own
+    /// anti-aliased boundary and edge shadows read as "locally dark" there.
+    private static func paperRegion(
+        gray: [UInt8], width w: Int, height h: Int, margin: Int
+    ) -> [Bool]? {
+        let total = w * h
+        var histogram = [Int](repeating: 0, count: 256)
+        for value in gray { histogram[Int(value)] += 1 }
+        let split = otsuThreshold(histogram: histogram, total: total)
+
+        // Largest 4-connected bright region.
+        var labels = [Int32](repeating: 0, count: total)
+        var nextLabel: Int32 = 1
+        var bestLabel: Int32 = 0
+        var bestCount = 0
+        var stack: [Int] = []
+        for start in 0..<total where Int(gray[start]) >= split && labels[start] == 0 {
+            var count = 0
+            labels[start] = nextLabel
+            stack.append(start)
+            func visit(_ neighbor: Int) {
+                if Int(gray[neighbor]) >= split && labels[neighbor] == 0 {
+                    labels[neighbor] = nextLabel
+                    stack.append(neighbor)
+                }
+            }
+            while let index = stack.popLast() {
+                count += 1
+                let x = index % w, y = index / w
+                if x > 0 { visit(index - 1) }
+                if x < w - 1 { visit(index + 1) }
+                if y > 0 { visit(index - w) }
+                if y < h - 1 { visit(index + w) }
+            }
+            if count > bestCount {
+                bestCount = count
+                bestLabel = nextLabel
+            }
+            nextLabel += 1
+        }
+        guard bestCount > 0 else { return nil }
+
+        // Everything reachable from the frame border without entering that
+        // region is off-paper; unreachable pockets (ink strokes, drawings)
+        // stay part of the paper.
+        var outside = [Bool](repeating: false, count: total)
+        var outsideCount = 0
+        func seed(_ index: Int) {
+            if labels[index] != bestLabel && !outside[index] {
+                outside[index] = true
+                stack.append(index)
+            }
+        }
+        for x in 0..<w {
+            seed(x)
+            seed((h - 1) * w + x)
+        }
+        for y in 0..<h {
+            seed(y * w)
+            seed(y * w + w - 1)
+        }
+        while let index = stack.popLast() {
+            outsideCount += 1
+            let x = index % w, y = index / w
+            if x > 0 { seed(index - 1) }
+            if x < w - 1 { seed(index + 1) }
+            if y > 0 { seed(index - w) }
+            if y < h - 1 { seed(index + w) }
+        }
+
+        let paperCount = total - outsideCount
+        // Nearly all paper: a scan — restriction would only cost content.
+        if paperCount * 10 >= total * 9 { return nil }
+        // No dominant paper either: don't guess, let the trace guards cope.
+        if paperCount * 5 < total { return nil }
+
+        // Erode by Chebyshev distance-to-outside (two-pass chamfer, O(pixels)).
+        // The world beyond the frame counts as outside too: where the paper
+        // is cropped by the frame, the frame edge *is* the paper edge and
+        // carries the same seam artifacts, so the margin must erode there
+        // just like along a visible paper boundary.
+        let far = w + h
+        var distance = [Int](repeating: far, count: total)
+        for index in 0..<total where outside[index] { distance[index] = 0 }
+        for x in 0..<w {
+            distance[x] = min(distance[x], 1)
+            distance[(h - 1) * w + x] = min(distance[(h - 1) * w + x], 1)
+        }
+        for y in 0..<h {
+            distance[y * w] = min(distance[y * w], 1)
+            distance[y * w + w - 1] = min(distance[y * w + w - 1], 1)
+        }
+        for y in 0..<h {
+            for x in 0..<w {
+                let index = y * w + x
+                var d = distance[index]
+                if x > 0 { d = min(d, distance[index - 1] + 1) }
+                if y > 0 {
+                    d = min(d, distance[index - w] + 1)
+                    if x > 0 { d = min(d, distance[index - w - 1] + 1) }
+                    if x < w - 1 { d = min(d, distance[index - w + 1] + 1) }
+                }
+                distance[index] = d
+            }
+        }
+        for y in (0..<h).reversed() {
+            for x in (0..<w).reversed() {
+                let index = y * w + x
+                var d = distance[index]
+                if x < w - 1 { d = min(d, distance[index + 1] + 1) }
+                if y < h - 1 {
+                    d = min(d, distance[index + w] + 1)
+                    if x < w - 1 { d = min(d, distance[index + w + 1] + 1) }
+                    if x > 0 { d = min(d, distance[index + w - 1] + 1) }
+                }
+                distance[index] = d
+            }
+        }
+        return distance.map { $0 > margin }
+    }
+
+    /// The adaptive window saturates inside solid fills larger than itself
+    /// (the local mean becomes the ink), hollowing them out. Refill enclosed
+    /// background pockets that are as dark as the ink around them — the pen
+    /// really covered those. Bright pockets are paper (the inside of a drawn
+    /// loop) and stay background. 4-connected background can't leak through
+    /// 8-connected strokes, so "enclosed" is exact.
+    private static func fillDarkHoles(ink: inout [Bool], gray: [UInt8], width w: Int, height h: Int) {
+        let total = w * h
+        var reached = [Bool](repeating: false, count: total)
+        var stack: [Int] = []
+        func seed(_ index: Int) {
+            if !ink[index] && !reached[index] {
+                reached[index] = true
+                stack.append(index)
+            }
+        }
+        for x in 0..<w {
+            seed(x)
+            seed((h - 1) * w + x)
+        }
+        for y in 0..<h {
+            seed(y * w)
+            seed(y * w + w - 1)
+        }
+        while let index = stack.popLast() {
+            let x = index % w, y = index / w
+            if x > 0 { seed(index - 1) }
+            if x < w - 1 { seed(index + 1) }
+            if y > 0 { seed(index - w) }
+            if y < h - 1 { seed(index + w) }
+        }
+
+        var hole: [Int] = []
+        for start in 0..<total where !ink[start] && !reached[start] {
+            hole.removeAll(keepingCapacity: true)
+            var holeSum = 0
+            var boundarySum = 0
+            var boundaryCount = 0
+            reached[start] = true
+            stack.append(start)
+            func visit(_ neighbor: Int) {
+                if ink[neighbor] {
+                    boundarySum += Int(gray[neighbor])
+                    boundaryCount += 1
+                } else if !reached[neighbor] {
+                    reached[neighbor] = true
+                    stack.append(neighbor)
+                }
+            }
+            while let index = stack.popLast() {
+                hole.append(index)
+                holeSum += Int(gray[index])
+                let x = index % w, y = index / w
+                if x > 0 { visit(index - 1) }
+                if x < w - 1 { visit(index + 1) }
+                if y > 0 { visit(index - w) }
+                if y < h - 1 { visit(index + w) }
+            }
+            let holeMean = holeSum / hole.count
+            let boundaryMean = boundaryCount > 0 ? boundarySum / boundaryCount : 0
+            if holeMean <= boundaryMean + 40 {
+                for index in hole { ink[index] = true }
+            }
+        }
     }
 
     /// Classic Otsu: pick the threshold maximizing between-class variance.

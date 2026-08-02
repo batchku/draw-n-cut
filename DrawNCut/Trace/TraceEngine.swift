@@ -85,12 +85,27 @@ enum TraceEngine {
 
     static func trace(bitmap: BinaryBitmap, parameters: TraceParameters) -> [TracedElement] {
         let components = bitmap.inkComponents(minArea: parameters.speckleMinArea)
+        let imagePixels = bitmap.width * bitmap.height
+        let diagonal = (Double(bitmap.width * bitmap.width) + Double(bitmap.height * bitmap.height)).squareRoot()
         return components.compactMap { component in
-            element(for: component, parameters: parameters)
+            // A drawn mark never spans (nearly) the whole frame in both
+            // directions at once; a component that does is mis-thresholded
+            // background, not pen work.
+            if 10 * component.size.width > 8 * bitmap.width,
+               10 * component.size.height > 8 * bitmap.height {
+                return nil
+            }
+            // Thinning cost grows with area × thickness — a tenth of the
+            // frame's pixels is already far beyond any dense scribble, and
+            // skeletonizing a background-sized blob stalls for minutes.
+            if 10 * component.area > imagePixels { return nil }
+            return element(for: component, parameters: parameters, imageDiagonal: diagonal)
         }
     }
 
-    private static func element(for component: InkComponent, parameters: TraceParameters) -> TracedElement? {
+    private static func element(
+        for component: InkComponent, parameters: TraceParameters, imageDiagonal: Double
+    ) -> TracedElement? {
         let skeleton = Skeletonizer.skeleton(of: component.localBitmap())
         let offset = SIMD2(Double(component.origin.x), Double(component.origin.y))
         let raw = Skeletonizer.polylines(from: skeleton)
@@ -110,9 +125,18 @@ enum TraceEngine {
                 Polyline(points: polyline.points.map { $0 + offset }, isClosed: polyline.isClosed)
             }
 
-        // A filled dot (an eye, a freckle) skeletonizes to almost nothing —
-        // represent it as a small closed loop so it still engraves.
+        // A filled dot (an eye, a freckle) or solid blob skeletonizes to
+        // almost nothing — represent it as a small closed loop so it still
+        // engraves. Only dot-sized marks and genuinely solid fills earn the
+        // loop: a big sparse component whose curves all filtered away is
+        // thresholding garbage, and synthesizing a loop from its area would
+        // invent a mark the pen never made.
         if processed.isEmpty {
+            let maxSide = Double(max(component.size.width, component.size.height))
+            let density = Double(component.area) / Double(component.size.width * component.size.height)
+            let isDot = maxSide <= max(0.02 * imageDiagonal, 12)
+            let isSolidFill = density > 0.5 && maxSide <= 0.25 * imageDiagonal
+            guard isDot || isSolidFill else { return nil }
             let bbox = component.boundingBox
             let center = SIMD2(Double(bbox.midX), Double(bbox.midY))
             let radius = max(1.0, (Double(component.area) / Double.pi).squareRoot())
