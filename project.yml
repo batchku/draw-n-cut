@@ -35,6 +35,10 @@ targets:
     platform: iOS
     sources:
       - DrawNCutTests
+      - path: Fixtures
+        buildPhase: resources
+        includes:
+          - "*.png"
     dependencies:
       - target: DrawNCut
     settings:
