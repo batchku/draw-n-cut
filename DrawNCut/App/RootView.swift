@@ -10,10 +10,12 @@ enum Route: Hashable {
 
 struct RootView: View {
     @State private var path: [Route] = []
+    @State private var store = ProjectStore()
 
     var body: some View {
         NavigationStack(path: $path) {
             LibraryView(path: $path)
+                .onAppear { try? store.loadAll() }
                 .navigationDestination(for: Route.self) { route in
                     switch route {
                     case .capture:
@@ -45,6 +47,7 @@ struct RootView: View {
                     }
                 }
         }
+        .environment(store)
     }
 }
 

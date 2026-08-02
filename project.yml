@@ -30,3 +30,24 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic
+  DrawNCutTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - DrawNCutTests
+    dependencies:
+      - target: DrawNCut
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+schemes:
+  DrawNCut:
+    build:
+      targets:
+        DrawNCut: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - DrawNCutTests
