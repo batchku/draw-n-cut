@@ -131,6 +131,15 @@ final class TraceSession {
         )
     }
 
+    /// Re-reads `mask.png` and re-traces. The refine screen may have
+    /// rewritten or deleted the mask while this screen sat lower in the
+    /// navigation stack — popping back must pick that up.
+    func reloadMask() async {
+        guard let image else { return }
+        await loadMask(for: image)
+        scheduleRetrace(debounce: false)
+    }
+
     // MARK: - Tracing
 
     private func scheduleRetrace(debounce: Bool) {

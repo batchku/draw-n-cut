@@ -31,6 +31,12 @@ struct TraceView: View {
             session = newSession
             await newSession.load()
         }
+        .onAppear {
+            // Popping back from Select Subject reveals this same instance;
+            // the mask file may have changed while it sat in the stack.
+            guard let session else { return }
+            Task { await session.reloadMask() }
+        }
     }
 
     @ViewBuilder
