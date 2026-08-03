@@ -190,39 +190,53 @@ private struct TraceCanvas: View {
     let showPhoto: Bool
     let eraserMode: Bool
 
+    @State private var zoom: CGFloat = 1
+    @State private var panOffset: CGSize = .zero
+
+    /// Eraser radius as the finger experiences it, regardless of zoom.
+    private let eraserViewRadius: CGFloat = 22
+
     var body: some View {
         GeometryReader { geometry in
             let imageSize = session.result?.imageSize ?? CGSize(width: 1, height: 1)
             let fit = fitTransform(imageSize: imageSize, into: geometry.size)
+            // Total image→view transform: fit, then zoom about the origin,
+            // then pan.
+            let scale = fit.scale * zoom
+            let offset = CGSize(
+                width: fit.offset.width * zoom + panOffset.width,
+                height: fit.offset.height * zoom + panOffset.height
+            )
 
-            ZStack {
+            Canvas { context, _ in
                 if showPhoto, let image = session.image {
-                    Image(decorative: image, scale: 1)
-                        .resizable()
-                        .scaledToFit()
-                        .opacity(0.25)
+                    let rect = CGRect(
+                        x: offset.width, y: offset.height,
+                        width: imageSize.width * scale, height: imageSize.height * scale
+                    )
+                    context.opacity = 0.25
+                    context.draw(Image(decorative: image, scale: 1), in: rect)
+                    context.opacity = 1
                 }
-                Canvas { context, _ in
-                    for item in session.visible {
-                        var swiftUIPath = Path()
-                        let points = item.polyline.points.map { point in
-                            CGPoint(
-                                x: point.x * fit.scale + fit.offset.width,
-                                y: point.y * fit.scale + fit.offset.height
-                            )
-                        }
-                        guard let first = points.first else { continue }
-                        swiftUIPath.move(to: first)
-                        for point in points.dropFirst() { swiftUIPath.addLine(to: point) }
-                        if item.polyline.isClosed { swiftUIPath.closeSubpath() }
-
-                        let style = color(for: item.suggestion)
-                        context.stroke(
-                            swiftUIPath,
-                            with: .color(style.color),
-                            lineWidth: style.emphasized ? 3 : 1.5
+                for item in session.visible {
+                    var swiftUIPath = Path()
+                    let points = item.polyline.points.map { point in
+                        CGPoint(
+                            x: point.x * scale + offset.width,
+                            y: point.y * scale + offset.height
                         )
                     }
+                    guard let first = points.first else { continue }
+                    swiftUIPath.move(to: first)
+                    for point in points.dropFirst() { swiftUIPath.addLine(to: point) }
+                    if item.polyline.isClosed { swiftUIPath.closeSubpath() }
+
+                    let style = color(for: item.suggestion)
+                    context.stroke(
+                        swiftUIPath,
+                        with: .color(style.color),
+                        lineWidth: style.emphasized ? 3 : 1.5
+                    )
                 }
             }
             .contentShape(Rectangle())
@@ -230,18 +244,47 @@ private struct TraceCanvas: View {
             .accessibilityIdentifier("traceCanvas")
             .accessibilityValue("\(session.visible.count) paths")
             .overlay {
-                TouchOverlay(eraserActive: eraserMode) { location in
-                    let imagePoint = SIMD2(
-                        (location.x - fit.offset.width) / fit.scale,
-                        (location.y - fit.offset.height) / fit.scale
+                TouchOverlay(eraserActive: eraserMode) { previous, current in
+                    let toImage = { (p: CGPoint) in
+                        SIMD2(
+                            (p.x - offset.width) / scale,
+                            (p.y - offset.height) / scale
+                        )
+                    }
+                    session.eraseSweep(
+                        from: previous.map(toImage),
+                        to: toImage(current),
+                        radius: eraserViewRadius / scale
                     )
-                    session.eraseSweep(at: imagePoint)
+                } onPan: { delta in
+                    panOffset.width += delta.x
+                    panOffset.height += delta.y
+                    clampPan(viewport: geometry.size)
+                } onPinch: { scaleDelta, centroid in
+                    let newZoom = min(8, max(1, zoom * scaleDelta))
+                    let applied = newZoom / zoom
+                    // Keep the pinch centroid stationary on screen.
+                    panOffset.width = centroid.x - (centroid.x - panOffset.width) * applied
+                    panOffset.height = centroid.y - (centroid.y - panOffset.height) * applied
+                    zoom = newZoom
+                    clampPan(viewport: geometry.size)
                 } onTwoFingerTap: {
                     session.undoErase()
                 }
             }
         }
         .background(Color(.systemBackground))
+    }
+
+    private func clampPan(viewport: CGSize) {
+        if zoom <= 1 {
+            panOffset = .zero
+            return
+        }
+        let minX = viewport.width * (1 - zoom)
+        let minY = viewport.height * (1 - zoom)
+        panOffset.width = min(0, max(minX, panOffset.width))
+        panOffset.height = min(0, max(minY, panOffset.height))
     }
 
     private func color(for suggestion: RemovalReason?) -> (color: Color, emphasized: Bool) {

@@ -34,7 +34,9 @@ final class TraceSession {
     var detail: Double = 0.7 {
         didSet { if oldValue != detail { scheduleRetrace(debounce: true) } }
     }
-    private(set) var eraseTaps: [SIMD2<Double>] = []
+    /// Each erase gesture sample with the radius it was made at — zoomed-in
+    /// erasing is finer than zoomed-out, and re-tracing replays them exactly.
+    private(set) var eraseTaps: [(point: SIMD2<Double>, radius: Double)] = []
 
     private var textRegions: [CGRect] = []
     private var retraceTask: Task<Void, Never>?
@@ -155,9 +157,10 @@ final class TraceSession {
         return byTarget
     }
 
-    /// Re-applies erase taps against the current trace result.
+    /// Re-applies erase taps against the current trace result, each at the
+    /// radius it was originally made with.
     private func reapplyErasures() {
-        removedTargets = Set(eraseTaps.compactMap { target(near: $0) })
+        removedTargets = Set(eraseTaps.flatMap { targets(within: $0.radius, of: $0.point) })
     }
 
     // MARK: - Erasing
@@ -183,19 +186,52 @@ final class TraceSession {
         return best?.0
     }
 
-    func erase(at point: SIMD2<Double>) {
-        guard target(near: point) != nil else { return }
-        eraseTaps.append(point)
-        reapplyErasures()
+    /// Fingertip-sized eraser radius in image pixels at 1× zoom.
+    var defaultEraserRadius: Double {
+        guard let result else { return 60 }
+        return 0.03 * hypot(result.imageSize.width, result.imageSize.height)
     }
 
-    /// Continuous erasing while a finger sweeps: records a tap only when it
-    /// hits a polyline that isn't already erased, so one sweep produces one
-    /// undo step per removed line rather than hundreds of points.
-    func eraseSweep(at point: SIMD2<Double>) {
-        guard let key = target(near: point), !removedTargets.contains(key) else { return }
-        eraseTaps.append(point)
-        removedTargets.insert(key)
+    /// Every polyline within `radius` of a point — the eraser removes all of
+    /// them, not just the nearest.
+    private func targets(within radius: Double, of point: SIMD2<Double>) -> [TargetKey] {
+        guard let result else { return [] }
+        var hits: [TargetKey] = []
+        for (e, element) in result.elements.enumerated() {
+            for (p, polyline) in element.polylines.enumerated() {
+                var points = polyline.points
+                if polyline.isClosed, let first = points.first { points.append(first) }
+                guard points.count > 1 else { continue }
+                for i in 0..<(points.count - 1) {
+                    if PathGeometry.distanceToSegment(point, points[i], points[i + 1]) <= radius {
+                        hits.append(TargetKey(elementIndex: e, polylineIndex: p))
+                        break
+                    }
+                }
+            }
+        }
+        return hits
+    }
+
+    /// Continuous erasing while a finger sweeps. Touch samples arrive far
+    /// apart during a fast sweep, so the segment between the previous and
+    /// current sample is walked in radius-sized steps and everything within
+    /// the eraser radius of any step is removed. One recorded tap per removed
+    /// line keeps undo line-granular.
+    func eraseSweep(from previous: SIMD2<Double>?, to point: SIMD2<Double>, radius: Double) {
+        var samples: [SIMD2<Double>] = [point]
+        if let previous {
+            let segment = point - previous
+            let length = simd_length(segment)
+            let steps = max(1, Int(length / (radius * 0.5)))
+            samples = (0...steps).map { previous + segment * (Double($0) / Double(steps)) }
+        }
+        for sample in samples {
+            for key in targets(within: radius, of: sample) where !removedTargets.contains(key) {
+                removedTargets.insert(key)
+                eraseTaps.append((sample, radius))
+            }
+        }
     }
 
     func undoErase() {
@@ -239,7 +275,9 @@ final class TraceSession {
         for key in suggestionsByTarget.keys where !removedTargets.contains(key) {
             let polyline = result.elements[key.elementIndex].polylines[key.polylineIndex]
             let mid = polyline.points[polyline.points.count / 2]
-            eraseTaps.append(mid)
+            // Tight radius: the tap sits ON the suggested polyline and must
+            // not take neighbors with it.
+            eraseTaps.append((mid, 6))
         }
         suggestionsApplied = true
         reapplyErasures()
@@ -248,7 +286,10 @@ final class TraceSession {
     // MARK: - Versions
 
     func saveVersion() throws {
-        let snapshot = TraceSnapshot(detail: detail, eraseTaps: eraseTaps.map { [$0.x, $0.y] })
+        let snapshot = TraceSnapshot(
+            detail: detail,
+            eraseTaps: eraseTaps.map { [$0.point.x, $0.point.y, $0.radius] }
+        )
         let data = try JSONEncoder().encode(snapshot)
         _ = try store.addTraceVersion(to: project, detail: detail, pathsData: data)
         syncProject()
@@ -258,7 +299,12 @@ final class TraceSession {
         let url = store.tracePathsURL(for: version, in: project)
         guard let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(TraceSnapshot.self, from: data) else { return }
-        eraseTaps = snapshot.eraseTaps.compactMap { $0.count == 2 ? SIMD2($0[0], $0[1]) : nil }
+        // Older snapshots stored [x, y]; current ones add the radius.
+        eraseTaps = snapshot.eraseTaps.compactMap { values in
+            guard values.count >= 2 else { return nil }
+            let radius = values.count >= 3 ? values[2] : defaultEraserRadius
+            return (SIMD2(values[0], values[1]), radius)
+        }
         try? store.setActiveTraceVersion(version, in: project)
         syncProject()
         if detail == snapshot.detail {
