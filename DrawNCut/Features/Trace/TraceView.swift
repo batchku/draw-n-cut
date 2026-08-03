@@ -151,6 +151,18 @@ struct TraceView: View {
             }
         }
         ToolbarItem(placement: .secondaryAction) {
+            // Run (or redo) SAM subject selection on this stored drawing —
+            // the only way a cut outline comes into existence.
+            Button {
+                path.append(.refineMask(projectID: projectID))
+            } label: {
+                Label(
+                    session.hasSubjectMask ? "Redo Outline" : "Select Subject",
+                    systemImage: "person.and.background.dotted"
+                )
+            }
+        }
+        ToolbarItem(placement: .secondaryAction) {
             versionsMenu(session)
         }
         ToolbarItem(placement: .secondaryAction) {

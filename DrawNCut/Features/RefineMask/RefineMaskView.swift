@@ -118,7 +118,9 @@ struct RefineMaskView: View {
             HStack(spacing: 12) {
                 Button {
                     session.discardSavedMask()
-                    path.append(.trace(projectID: projectID))
+                    // Replace the stack: a fresh trace screen (stale ones
+                    // would show the old outline), with back → library.
+                    path = [.trace(projectID: projectID)]
                 } label: {
                     Text("Trace Everything")
                         .frame(maxWidth: .infinity)
@@ -129,7 +131,7 @@ struct RefineMaskView: View {
                 Button {
                     do {
                         try session.saveMask()
-                        path.append(.trace(projectID: projectID))
+                        path = [.trace(projectID: projectID)]
                     } catch {
                         saveError = "Couldn't save the outline: \(error.localizedDescription)"
                     }
