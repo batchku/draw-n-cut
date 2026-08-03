@@ -68,12 +68,19 @@ enum TraceEngine {
     ///   - image: the rectified drawing.
     ///   - mask: optional subject mask (same dimensions as the binarized
     ///     image); ink outside the mask is ignored.
+    ///   - eraseMask: optional erase mask (same dimensions); ink inside it
+    ///     is dropped before analysis, so erased marks cannot re-trace.
     ///   - detail: the single user-facing slider, 0...1.
-    static func trace(image: CGImage, mask: BinaryBitmap? = nil, detail: Double) -> TraceResult? {
+    static func trace(
+        image: CGImage, mask: BinaryBitmap? = nil, eraseMask: BinaryBitmap? = nil, detail: Double
+    ) -> TraceResult? {
         var report: BinarizationReport?
         guard var bitmap = BinaryBitmap(cgImage: image, report: &report) else { return nil }
         if let mask {
             bitmap.intersect(mask)
+        }
+        if let eraseMask {
+            bitmap.subtract(eraseMask)
         }
         let w = Double(bitmap.width)
         let h = Double(bitmap.height)

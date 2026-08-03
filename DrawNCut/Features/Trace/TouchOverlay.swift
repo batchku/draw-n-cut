@@ -12,6 +12,8 @@ struct TouchOverlay: UIViewRepresentable {
     var eraserActive: Bool
     /// (previous, current) in view coordinates; previous is nil at stroke start.
     var onErase: (CGPoint?, CGPoint) -> Void
+    /// The erase stroke lifted — commit whatever was collected.
+    var onEraseEnd: () -> Void
     var onPan: (CGPoint) -> Void
     var onPinch: (CGFloat, CGPoint) -> Void
     var onTwoFingerTap: () -> Void
@@ -74,6 +76,7 @@ struct TouchOverlay: UIViewRepresentable {
                     lastErasePoint = location
                 default:
                     lastErasePoint = nil
+                    parent.onEraseEnd()
                 }
             } else {
                 let delta = recognizer.translation(in: recognizer.view)
@@ -85,6 +88,7 @@ struct TouchOverlay: UIViewRepresentable {
         @objc func singleTap(_ recognizer: UITapGestureRecognizer) {
             guard parent.eraserActive else { return }
             parent.onErase(nil, recognizer.location(in: recognizer.view))
+            parent.onEraseEnd()
         }
 
         @objc func doublePan(_ recognizer: UIPanGestureRecognizer) {

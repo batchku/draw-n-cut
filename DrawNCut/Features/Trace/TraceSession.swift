@@ -5,11 +5,15 @@ import Observation
 import simd
 
 /// One saved trace version's content: the Detail setting plus the user's
-/// erase taps. Erasures are stored as image-space points and re-applied by
-/// hit-testing after every re-trace, so they survive Detail changes.
+/// erase shapes. Erasures are image-space regions rasterized into a mask
+/// that is subtracted from the ink before every trace, so they survive
+/// Detail changes exactly.
 struct TraceSnapshot: Codable {
     var detail: Double
-    var eraseTaps: [[Double]]
+    /// Legacy format: [x, y] or [x, y, radius] hit-test taps. Still decoded
+    /// (as brush dots) so old saved versions keep working.
+    var eraseTaps: [[Double]] = []
+    var eraseShapes: [EraseShape]? = nil
 }
 
 /// Drives the trace screen: owns the image, re-traces when Detail changes,
@@ -32,9 +36,14 @@ final class TraceSession {
     private(set) var result: TraceResult?
     /// Subject mask in trace space; ink outside it is ignored while tracing.
     private var mask: BinaryBitmap?
-    /// The sticker-style CUT outline derived from the mask; nil when the
-    /// user traced everything. Not erasable — it is the piece's edge.
+    /// The sticker-style CUT outline around the piece. Derived from the
+    /// subject mask when one exists, otherwise recomputed from the traced
+    /// ink after every re-trace — either way it is a closed loop by
+    /// construction. Not erasable: it is the piece's edge.
     private(set) var cutOutline: Polyline?
+    /// The mask-derived outline, stable across re-traces; nil when the user
+    /// traced everything and the outline instead follows the ink.
+    private var subjectOutline: Polyline?
     private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
     private(set) var isTracing = false
@@ -43,9 +52,9 @@ final class TraceSession {
     var detail: Double = 0.7 {
         didSet { if oldValue != detail { scheduleRetrace(debounce: true) } }
     }
-    /// Each erase gesture sample with the radius it was made at — zoomed-in
-    /// erasing is finer than zoomed-out, and re-tracing replays them exactly.
-    private(set) var eraseTaps: [(point: SIMD2<Double>, radius: Double)] = []
+    /// Every erase gesture, in image space. Rasterized into a mask and
+    /// subtracted from the ink before each trace.
+    private(set) var eraseShapes: [EraseShape] = []
 
     private var textRegions: [CGRect] = []
     private var retraceTask: Task<Void, Never>?
@@ -96,6 +105,7 @@ final class TraceSession {
         let maskURL = store.maskURL(for: project)
         guard FileManager.default.fileExists(atPath: maskURL.path) else {
             mask = nil
+            subjectOutline = nil
             cutOutline = nil
             return
         }
@@ -107,6 +117,7 @@ final class TraceSession {
             return (bitmap, MaskGeometry.stickerOutline(around: bitmap, offsetPixels: offset))
         }.value
         mask = loaded?.0
+        subjectOutline = loaded?.1
         cutOutline = loaded?.1
         TraceLog.log(
             "mask \(loaded == nil ? "FAILED to load" : "loaded"), cut outline \(cutOutline == nil ? "absent" : "\(cutOutline!.points.count) points")",
@@ -122,6 +133,8 @@ final class TraceSession {
         let detail = detail
         let regions = textRegions
         let mask = mask
+        let shapes = eraseShapes
+        let hasSubjectOutline = subjectOutline != nil
         isTracing = true
         retraceTask = Task { [weak self] in
             if debounce {
@@ -130,27 +143,66 @@ final class TraceSession {
             guard !Task.isCancelled else { return }
             // Trace, classify, and detect all off the main actor — in a debug
             // build this is seconds of work on a full-page scan.
-            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason])? in
-                guard let traced = TraceEngine.trace(image: image, mask: mask, detail: detail) else { return nil }
+            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason], Polyline?)? in
+                let traceSpace = BinaryBitmap.traceSize(for: image)
+                let eraseMask = EraseMask.bitmap(
+                    from: shapes, width: Int(traceSpace.width), height: Int(traceSpace.height))
+                guard let traced = TraceEngine.trace(
+                    image: image, mask: mask, eraseMask: eraseMask, detail: detail) else { return nil }
                 let classification = ElementClassifier.classify(traced)
                 let suggestions = NonSubjectDetector.suggestions(
                     for: classification,
                     imageSize: traced.imageSize,
                     textRegions: regions
                 )
-                return (traced, Self.targets(for: suggestions, in: traced))
+                // Without a subject mask the CUT outline follows whatever ink
+                // survived erasing — recomputed here so it stays closed and
+                // current after every change.
+                let fallback = hasSubjectOutline ? nil : Self.inkOutline(for: traced)
+                return (traced, Self.targets(for: suggestions, in: traced), fallback)
             }.value
-            guard !Task.isCancelled, let self, let (traced, byTarget) = computed else { return }
+            guard !Task.isCancelled, let self, let (traced, byTarget, fallback) = computed else { return }
             self.result = traced
             self.suggestionsByTarget = byTarget
             self.isTracing = false
-            self.reapplyErasures()
+            // The mask already excluded every erased region from this trace;
+            // per-polyline removals were only instant feedback and would
+            // otherwise hide freshly traced neighbors.
+            self.removedTargets = []
+            if self.subjectOutline == nil {
+                self.cutOutline = fallback
+            }
             self.logTraceOutcome(traced, suggestionCount: byTarget.count)
             // Text regions may have landed while this trace was running.
             if self.textRegions != regions {
                 self.refreshSuggestions()
             }
         }
+    }
+
+    /// Sticker-style CUT outline around everything traced, used when no
+    /// subject mask exists: rasterize the centerlines at pen width, grow by
+    /// the offset, and contour — closed by construction, unlike any traced
+    /// polyline.
+    nonisolated private static func inkOutline(for result: TraceResult) -> Polyline? {
+        let width = Int(result.imageSize.width), height = Int(result.imageSize.height)
+        guard width > 0, height > 0 else { return nil }
+        var bitmap = BinaryBitmap(width: width, height: height)
+        var inked = false
+        for element in result.elements {
+            let radius = max(1.0, element.estimatedStrokeWidth / 2)
+            for polyline in element.polylines {
+                var points = polyline.points
+                if polyline.isClosed, let first = points.first { points.append(first) }
+                guard !points.isEmpty else { continue }
+                EraseMask.stampStroke(points, radius: radius, into: &bitmap)
+                inked = true
+            }
+        }
+        guard inked else { return nil }
+        let diagonal = Double(hypot(result.imageSize.width, result.imageSize.height))
+        let offset = max(1, Int(cutOutlineOffsetFraction * diagonal))
+        return MaskGeometry.stickerOutline(around: bitmap, offsetPixels: offset)
     }
 
     private var diagnosticsURL: URL {
@@ -191,12 +243,6 @@ final class TraceSession {
             }
         }
         return byTarget
-    }
-
-    /// Re-applies erase taps against the current trace result, each at the
-    /// radius it was originally made with.
-    private func reapplyErasures() {
-        removedTargets = Set(eraseTaps.flatMap { targets(within: $0.radius, of: $0.point) })
     }
 
     // MARK: - Erasing
@@ -249,38 +295,47 @@ final class TraceSession {
         return hits
     }
 
-    /// Continuous erasing while a finger sweeps. Touch samples arrive far
-    /// apart during a fast sweep, so the segment between the previous and
-    /// current sample is walked in radius-sized steps and everything within
-    /// the eraser radius of any step is removed. One recorded tap per removed
-    /// line keeps undo line-granular.
-    func eraseSweep(from previous: SIMD2<Double>?, to point: SIMD2<Double>, radius: Double) {
-        var samples: [SIMD2<Double>] = [point]
-        if let previous {
-            let segment = point - previous
-            let length = simd_length(segment)
-            let steps = max(1, Int(length / (radius * 0.5)))
-            samples = (0...steps).map { previous + segment * (Double($0) / Double(steps)) }
-        }
-        for sample in samples {
-            for key in targets(within: radius, of: sample) where !removedTargets.contains(key) {
-                removedTargets.insert(key)
-                eraseTaps.append((sample, radius))
+    /// Lasso erase: everything inside the closed loop is masked out of the
+    /// ink before every subsequent trace, so it stays erased at any Detail.
+    /// Polylines mostly inside the loop disappear immediately for feedback;
+    /// the masked re-trace is authoritative.
+    func eraseLasso(points: [SIMD2<Double>]) {
+        guard points.count >= 3 else { return }
+        eraseShapes.append(.lasso(points: points))
+        if let result {
+            for (e, element) in result.elements.enumerated() {
+                for (p, polyline) in element.polylines.enumerated() {
+                    let inside = polyline.points.count { PathGeometry.polygon(points, contains: $0) }
+                    if inside * 2 > polyline.points.count {
+                        removedTargets.insert(TargetKey(elementIndex: e, polylineIndex: p))
+                    }
+                }
             }
         }
+        scheduleRetrace(debounce: true)
+    }
+
+    /// Spot erase (a tap): a brush dot into the mask, with instant
+    /// polyline-level feedback like the lasso.
+    func eraseSpot(at point: SIMD2<Double>, radius: Double) {
+        eraseShapes.append(.brush(points: [point], radius: radius))
+        for key in targets(within: radius, of: point) {
+            removedTargets.insert(key)
+        }
+        scheduleRetrace(debounce: true)
     }
 
     func undoErase() {
-        guard !eraseTaps.isEmpty else { return }
-        eraseTaps.removeLast()
+        guard !eraseShapes.isEmpty else { return }
+        eraseShapes.removeLast()
         suggestionsApplied = false
-        reapplyErasures()
+        scheduleRetrace(debounce: false)
     }
 
     func resetErases() {
-        eraseTaps.removeAll()
+        eraseShapes.removeAll()
         suggestionsApplied = false
-        reapplyErasures()
+        scheduleRetrace(debounce: false)
     }
 
     /// Recomputes suggestions off-main against the existing trace result
@@ -300,32 +355,33 @@ final class TraceSession {
             }.value
             guard let self else { return }
             self.suggestionsByTarget = byTarget
-            self.reapplyErasures()
         }
     }
 
-    /// Accepts every current suggestion by converting it into an erase tap on
-    /// the target polyline (so it persists across re-traces and into versions).
+    /// Accepts every current suggestion by brushing its centerline into the
+    /// erase mask (so it persists across re-traces and into versions).
     func applySuggestions() {
         guard let result else { return }
         for key in suggestionsByTarget.keys where !removedTargets.contains(key) {
-            let polyline = result.elements[key.elementIndex].polylines[key.polylineIndex]
-            let mid = polyline.points[polyline.points.count / 2]
-            // Tight radius: the tap sits ON the suggested polyline and must
-            // not take neighbors with it.
-            eraseTaps.append((mid, 6))
+            let element = result.elements[key.elementIndex]
+            let polyline = element.polylines[key.polylineIndex]
+            var points = polyline.points
+            if polyline.isClosed, let first = points.first { points.append(first) }
+            guard !points.isEmpty else { continue }
+            // A little wider than the pen so threshold flicker along the
+            // mark can't leave residue, but tight enough to spare neighbors.
+            let radius = max(3, 1.5 * element.estimatedStrokeWidth)
+            eraseShapes.append(.brush(points: points, radius: radius))
+            removedTargets.insert(key)
         }
         suggestionsApplied = true
-        reapplyErasures()
+        scheduleRetrace(debounce: false)
     }
 
     // MARK: - Versions
 
     func saveVersion() throws {
-        let snapshot = TraceSnapshot(
-            detail: detail,
-            eraseTaps: eraseTaps.map { [$0.point.x, $0.point.y, $0.radius] }
-        )
+        let snapshot = TraceSnapshot(detail: detail, eraseShapes: eraseShapes)
         let data = try JSONEncoder().encode(snapshot)
         _ = try store.addTraceVersion(to: project, detail: detail, pathsData: data)
         syncProject()
@@ -335,16 +391,21 @@ final class TraceSession {
         let url = store.tracePathsURL(for: version, in: project)
         guard let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(TraceSnapshot.self, from: data) else { return }
-        // Older snapshots stored [x, y]; current ones add the radius.
-        eraseTaps = snapshot.eraseTaps.compactMap { values in
-            guard values.count >= 2 else { return nil }
-            let radius = values.count >= 3 ? values[2] : defaultEraserRadius
-            return (SIMD2(values[0], values[1]), radius)
+        if let shapes = snapshot.eraseShapes {
+            eraseShapes = shapes
+        } else {
+            // Legacy snapshots stored hit-test taps ([x, y] or [x, y, radius]);
+            // a brush dot at the same spot erases the same mark's ink.
+            eraseShapes = snapshot.eraseTaps.compactMap { values in
+                guard values.count >= 2 else { return nil }
+                let radius = values.count >= 3 ? values[2] : defaultEraserRadius
+                return .brush(points: [SIMD2(values[0], values[1])], radius: radius)
+            }
         }
         try? store.setActiveTraceVersion(version, in: project)
         syncProject()
         if detail == snapshot.detail {
-            reapplyErasures()
+            scheduleRetrace(debounce: false)
         } else {
             detail = snapshot.detail   // triggers retrace
         }

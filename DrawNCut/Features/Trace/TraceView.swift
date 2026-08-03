@@ -94,7 +94,7 @@ struct TraceView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(eraserMode ? "Sweep over lines to erase • two-finger tap undoes" : "")
+                Text(eraserMode ? "Circle around things to erase • two-finger tap undoes" : "")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Button {
@@ -103,7 +103,7 @@ struct TraceView: View {
                     Image(systemName: "arrow.uturn.backward.circle.fill")
                         .font(.title2)
                 }
-                .disabled(session.eraseTaps.isEmpty)
+                .disabled(session.eraseShapes.isEmpty)
                 .accessibilityLabel("Undo erase")
                 Button {
                     eraserMode.toggle()
@@ -192,8 +192,11 @@ private struct TraceCanvas: View {
 
     @State private var zoom: CGFloat = 1
     @State private var panOffset: CGSize = .zero
+    /// The in-progress lasso, in view coordinates, while a finger circles
+    /// something in eraser mode.
+    @State private var lassoViewPoints: [CGPoint] = []
 
-    /// Eraser radius as the finger experiences it, regardless of zoom.
+    /// Spot-erase radius as the finger experiences it, regardless of zoom.
     private let eraserViewRadius: CGFloat = 22
 
     var body: some View {
@@ -227,12 +230,24 @@ private struct TraceCanvas: View {
                     )
                 }
                 // The sticker CUT outline — drawn last so it reads as the
-                // piece's edge. Not erasable: it isn't a traced polyline.
+                // piece's edge. Red like the DXF CUT layer. Not erasable:
+                // it isn't a traced polyline.
                 if let outline = session.cutOutline {
                     context.stroke(
                         path(for: outline, scale: scale, offset: offset),
-                        with: .color(.green),
+                        with: .color(.red),
                         lineWidth: 3
+                    )
+                }
+                // The lasso being drawn right now.
+                if lassoViewPoints.count > 1 {
+                    var lasso = Path()
+                    lasso.move(to: lassoViewPoints[0])
+                    for point in lassoViewPoints.dropFirst() { lasso.addLine(to: point) }
+                    context.stroke(
+                        lasso,
+                        with: .color(.orange),
+                        style: StrokeStyle(lineWidth: 2, dash: [6, 4])
                     )
                 }
             }
@@ -242,17 +257,25 @@ private struct TraceCanvas: View {
             .accessibilityValue("\(session.visible.count) paths")
             .overlay {
                 TouchOverlay(eraserActive: eraserMode) { previous, current in
+                    // Collect the loop; nothing erases until the finger lifts.
+                    if previous == nil {
+                        lassoViewPoints = [current]
+                    } else {
+                        lassoViewPoints.append(current)
+                    }
+                } onEraseEnd: {
                     let toImage = { (p: CGPoint) in
                         SIMD2(
                             (p.x - offset.width) / scale,
                             (p.y - offset.height) / scale
                         )
                     }
-                    session.eraseSweep(
-                        from: previous.map(toImage),
-                        to: toImage(current),
-                        radius: eraserViewRadius / scale
-                    )
+                    if lassoViewPoints.count >= 3 {
+                        session.eraseLasso(points: lassoViewPoints.map(toImage))
+                    } else if let point = lassoViewPoints.first {
+                        session.eraseSpot(at: toImage(point), radius: eraserViewRadius / scale)
+                    }
+                    lassoViewPoints = []
                 } onPan: { delta in
                     panOffset.width += delta.x
                     panOffset.height += delta.y
@@ -270,7 +293,7 @@ private struct TraceCanvas: View {
                 }
             }
         }
-        .background(Color(.systemBackground))
+        .background(Color.white)
     }
 
     private func clampPan(viewport: CGSize) {
@@ -299,12 +322,14 @@ private struct TraceCanvas: View {
         return swiftUIPath
     }
 
+    /// Engrave lines are blue (matching the DXF ENGRAVE layer); red is
+    /// reserved for the CUT outline. Suggestions highlight in warm hues.
     private func color(for suggestion: RemovalReason?) -> (color: Color, emphasized: Bool) {
         switch suggestion {
-        case .enclosingLoop: (.red, true)
-        case .textLike: (.blue, true)
-        case .edgeArtifact: (.orange, true)
-        case nil: (.primary, false)
+        case .enclosingLoop: (.orange, true)
+        case .textLike: (.purple, true)
+        case .edgeArtifact: (.pink, true)
+        case nil: (.blue, false)
         }
     }
 

@@ -533,6 +533,12 @@ struct BinaryBitmap {
         for i in pixels.indices { pixels[i] = pixels[i] && mask.pixels[i] }
     }
 
+    /// Clears every pixel that is set in `mask`.
+    mutating func subtract(_ mask: BinaryBitmap) {
+        precondition(mask.width == width && mask.height == height)
+        for i in pixels.indices where mask.pixels[i] { pixels[i] = false }
+    }
+
     // MARK: - Connected components
 
     /// 8-connected ink components, smallest speckles already dropped.
