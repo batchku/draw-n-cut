@@ -102,12 +102,13 @@ struct RefineMaskView: View {
         @Bindable var session = session
         return VStack(spacing: 12) {
             HStack(spacing: 16) {
-                Toggle(isOn: $session.removeMode) {
-                    Label("Remove Area", systemImage: "minus.circle")
-                        .font(.callout)
+                // Two-state mode switch, styled like the markers the taps
+                // leave behind.
+                HStack(spacing: 8) {
+                    modeButton("Add Area", isRemove: false, session: session)
+                    modeButton("Remove Area", isRemove: true, session: session)
+                        .disabled(session.mask == nil)
                 }
-                .toggleStyle(.button)
-                .disabled(session.mask == nil)
                 Spacer()
                 if session.phase == .segmenting {
                     ProgressView()
@@ -152,13 +153,45 @@ struct RefineMaskView: View {
         .padding()
         .background(.bar)
     }
+
+    /// One side of the Add/Remove switch: the same white-on-green plus or
+    /// white-on-red minus the user's taps drop onto the photo.
+    private func modeButton(_ title: String, isRemove: Bool, session: RefineMaskSession) -> some View {
+        let color: Color = isRemove ? .red : .green
+        let selected = session.removeMode == isRemove
+        return Button {
+            session.removeMode = isRemove
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: isRemove ? "minus.circle.fill" : "plus.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, color)
+                Text(title)
+                    .foregroundStyle(selected ? color : .secondary)
+            }
+            .font(.callout.weight(selected ? .semibold : .regular))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(selected ? color.opacity(0.15) : Color(.systemGray6), in: Capsule())
+            .overlay(Capsule().strokeBorder(selected ? color : .clear, lineWidth: 1.5))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
 }
 
-/// The photo with the mask tint, prompt-point markers, and tap capture.
-/// The tap layer sits exactly over the fitted image so view→image mapping
-/// is a single scale factor.
+/// The photo with the mask tint, prompt-point markers, tap capture, and
+/// pinch zoom / pan (same transform model as the trace canvas). A tap near
+/// an existing marker removes it; anywhere else it adds a prompt.
 private struct RefineCanvas: View {
     let session: RefineMaskSession
+
+    @State private var zoom: CGFloat = 1
+    @State private var panOffset: CGSize = .zero
+
+    /// How close (in screen points) a tap must land to a marker to delete it.
+    private let markerHitRadius: CGFloat = 18
 
     var body: some View {
         GeometryReader { geometry in
@@ -167,9 +200,14 @@ private struct RefineCanvas: View {
                 height: session.image.map { CGFloat($0.height) } ?? 1
             )
             let fit = fitTransform(imageSize: imageSize, into: geometry.size)
+            let scale = fit.scale * zoom
+            let offset = CGSize(
+                width: fit.offset.width * zoom + panOffset.width,
+                height: fit.offset.height * zoom + panOffset.height
+            )
             let fittedSize = CGSize(
-                width: imageSize.width * fit.scale,
-                height: imageSize.height * fit.scale
+                width: imageSize.width * scale,
+                height: imageSize.height * scale
             )
 
             ZStack(alignment: .topLeading) {
@@ -177,13 +215,13 @@ private struct RefineCanvas: View {
                     Image(decorative: image, scale: 1)
                         .resizable()
                         .frame(width: fittedSize.width, height: fittedSize.height)
-                        .offset(x: fit.offset.width, y: fit.offset.height)
+                        .offset(x: offset.width, y: offset.height)
                 }
                 if let maskImage = session.maskImage {
                     Image(decorative: maskImage, scale: 1)
                         .resizable()
                         .frame(width: fittedSize.width, height: fittedSize.height)
-                        .offset(x: fit.offset.width, y: fit.offset.height)
+                        .offset(x: offset.width, y: offset.height)
                         .allowsHitTesting(false)
                 }
                 ForEach(Array(session.points.enumerated()), id: \.offset) { _, prompt in
@@ -191,27 +229,64 @@ private struct RefineCanvas: View {
                         .font(.title3)
                         .foregroundStyle(.white, prompt.isSubject ? .green : .red)
                         .position(
-                            x: prompt.point.x * fit.scale + fit.offset.width,
-                            y: prompt.point.y * fit.scale + fit.offset.height
+                            x: prompt.point.x * scale + offset.width,
+                            y: prompt.point.y * scale + offset.height
                         )
                         .allowsHitTesting(false)
                 }
                 Color.clear
-                    .contentShape(Rectangle())
                     .frame(width: fittedSize.width, height: fittedSize.height)
-                    .offset(x: fit.offset.width, y: fit.offset.height)
-                    .onTapGesture { location in
-                        session.addPoint(atImage: SIMD2(
-                            location.x / fit.scale,
-                            location.y / fit.scale
-                        ))
-                    }
+                    .offset(x: offset.width, y: offset.height)
+                    .allowsHitTesting(false)
                     .accessibilityElement()
                     .accessibilityIdentifier("refineImageArea")
                     .accessibilityValue(maskDescription)
             }
+            .contentShape(Rectangle())
+            .overlay {
+                TouchOverlay(
+                    eraserActive: false,
+                    onErase: { _, _ in },
+                    onEraseEnd: {},
+                    onPan: { delta in
+                        panOffset.width += delta.x
+                        panOffset.height += delta.y
+                        clampPan(viewport: geometry.size)
+                    },
+                    onPinch: { scaleDelta, centroid in
+                        let newZoom = min(8, max(1, zoom * scaleDelta))
+                        let applied = newZoom / zoom
+                        // Keep the pinch centroid stationary on screen.
+                        panOffset.width = centroid.x - (centroid.x - panOffset.width) * applied
+                        panOffset.height = centroid.y - (centroid.y - panOffset.height) * applied
+                        zoom = newZoom
+                        clampPan(viewport: geometry.size)
+                    },
+                    onTwoFingerTap: {},
+                    onSingleTap: { location in
+                        session.handleTap(
+                            atImage: SIMD2(
+                                (location.x - offset.width) / scale,
+                                (location.y - offset.height) / scale
+                            ),
+                            hitRadius: markerHitRadius / scale
+                        )
+                    }
+                )
+            }
         }
-        .background(Color(.systemBackground))
+        .background(Color.white)
+    }
+
+    private func clampPan(viewport: CGSize) {
+        if zoom <= 1 {
+            panOffset = .zero
+            return
+        }
+        let minX = viewport.width * (1 - zoom)
+        let minY = viewport.height * (1 - zoom)
+        panOffset.width = min(0, max(minX, panOffset.width))
+        panOffset.height = min(0, max(minY, panOffset.height))
     }
 
     private var maskDescription: String {

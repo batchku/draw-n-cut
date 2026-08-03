@@ -101,6 +101,26 @@ final class RefineMaskSession {
         refreshMask()
     }
 
+    /// A tap near an existing marker deletes that prompt; anywhere else it
+    /// adds a new one in the current mode.
+    func handleTap(atImage point: SIMD2<Double>, hitRadius: Double) {
+        guard phase == .ready || phase == .segmenting else { return }
+        if let index = points.firstIndex(where: { simd_length($0.point - point) <= hitRadius }) {
+            points.remove(at: index)
+            if points.isEmpty {
+                // No prompts, no mask — same as reset, but keep the mode.
+                promptGeneration += 1
+                mask = nil
+                maskImage = nil
+                if phase == .segmenting { phase = .ready }
+            } else {
+                refreshMask()
+            }
+            return
+        }
+        addPoint(atImage: point)
+    }
+
     func reset() {
         promptGeneration += 1
         points.removeAll()

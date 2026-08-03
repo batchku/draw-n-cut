@@ -17,6 +17,8 @@ struct TouchOverlay: UIViewRepresentable {
     var onPan: (CGPoint) -> Void
     var onPinch: (CGFloat, CGPoint) -> Void
     var onTwoFingerTap: () -> Void
+    /// Single tap while the eraser is off (the refine screen's prompt taps).
+    var onSingleTap: ((CGPoint) -> Void)? = nil
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
@@ -86,9 +88,13 @@ struct TouchOverlay: UIViewRepresentable {
         }
 
         @objc func singleTap(_ recognizer: UITapGestureRecognizer) {
-            guard parent.eraserActive else { return }
-            parent.onErase(nil, recognizer.location(in: recognizer.view))
-            parent.onEraseEnd()
+            let location = recognizer.location(in: recognizer.view)
+            if parent.eraserActive {
+                parent.onErase(nil, location)
+                parent.onEraseEnd()
+            } else {
+                parent.onSingleTap?(location)
+            }
         }
 
         @objc func doublePan(_ recognizer: UIPanGestureRecognizer) {
