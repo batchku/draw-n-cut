@@ -96,6 +96,46 @@ For dev builds now: point `modelsDirectory` at the app bundle after adding
 `Models/*.mlpackage` to the target, or at the repo `Models/` dir when running
 on Mac (tests/harness).
 
+## Simulator caveat: the mask decoder returns empty masks
+
+On the iOS **simulator** (verified: iOS 26.5 runtime, Xcode 26.6, arm64 Mac)
+the mask decoder *executes* but its mask branch produces all-zero logits:
+`scores` come back plausible (0.09–0.74) while every `low_res_masks` value is
+exactly 0, so the decoded mask is empty. The image encoder and prompt encoder
+outputs are healthy. The identical Swift + models + fixture + prompt produce
+inkFraction ≈ 0.045 on macOS (and the models are published by Apple for
+device use). Upstream report of the same shape-inference failure:
+https://huggingface.co/apple/coreml-sam2.1-tiny/discussions/1
+
+Everything tried, all still zeros on the simulator:
+
+- compute units `.cpuOnly`, `.cpuAndGPU`, `.all`, `.cpuAndNeuralEngine`
+- Xcode-precompiled `.mlmodelc` vs runtime `MLModel.compileModel`
+- `MLOptimizationHints.specializationStrategy = .fastPrediction`
+- 1-point and 2-point prompts; fresh contiguous fp32 input buffers
+- patching the decoder spec to drop the `conv_transpose` ops' redundant
+  `output_shape` input (what the E5RT load warning suggests). The patched
+  model is bit-identical to the original on macOS but still zeros on the
+  simulator — the E5RT complaint just shifts to "tensor_buffer has known
+  strides while the model has FlexibleShapeInfo", pointing at the
+  flexible-shape (enumerated 1–16 point) compilation itself. Forcing the
+  spec static breaks the model (symbolic dims are baked into downstream
+  consts), so that path needs a full MIL round-trip — not worth it for a
+  simulator-only defect.
+
+Consequences for this repo:
+
+- `scripts/sam-macos-check/run.sh` compiles `SAM2Segmenter.swift` for macOS
+  and asserts the fish-body tap yields inkFraction 1–30%. This is the
+  machine-local proof that the pipeline works.
+- `SAM2SegmenterTests.fishBodyTapYieldsTightMask` runs the full pipeline in
+  the simulator; when the decode comes back empty **on the simulator** it
+  records a known issue instead of failing (strict on device / fixed runtimes).
+- The refine-mask UI treats an empty decode as "no mask" (hint to re-tap,
+  "Use Outline" stays disabled), so the simulator defect degrades to the
+  same UX as a missed tap; `RefineMaskUITests` skips the Use-Outline leg
+  when the mask never arrives.
+
 ## Known limitations / findings from the fish-photo fixture
 
 - **Prompt placement matters a lot on line drawings.** A tap on blank paper
