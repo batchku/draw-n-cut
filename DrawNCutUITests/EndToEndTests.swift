@@ -83,3 +83,26 @@ final class EndToEndTests: XCTestCase {
         add(attachment)
     }
 }
+
+extension EndToEndTests {
+    /// Library rows must open their project's trace screen.
+    func testLibraryRowOpensProject() throws {
+        // First launch seeds a project via the demo hook, then we return to
+        // the library and reopen it by tapping the row.
+        let app = XCUIApplication()
+        app.launchEnvironment["DEMO_IMAGE"] = "bundled:fish-photo"
+        app.launch()
+
+        let canvas = app.otherElements["traceCanvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 20))
+        app.navigationBars.buttons.firstMatch.tap()   // back to library
+
+        let row = app.buttons["projectRow"].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "library should list the project")
+        attachScreenshot(of: app, named: "library-before-tap")
+        row.tap()
+        let opened = canvas.waitForExistence(timeout: 20)
+        attachScreenshot(of: app, named: "after-row-tap")
+        XCTAssertTrue(opened, "tapping a row should open the trace screen")
+    }
+}

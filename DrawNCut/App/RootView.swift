@@ -39,6 +39,18 @@ struct RootView: View {
                 }
         }
         .environment(store)
+        .onChange(of: path) { old, new in
+            TraceLog.log("nav path \(old.map(describe)) → \(new.map(describe))")
+        }
+    }
+
+    private func describe(_ route: Route) -> String {
+        switch route {
+        case .capture: "capture"
+        case .refineMask: "refineMask"
+        case .trace: "trace"
+        case .export: "export"
+        }
     }
 
     /// Test/demo hook: `DEMO_IMAGE=<path>` in the launch environment creates

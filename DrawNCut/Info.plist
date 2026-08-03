@@ -32,5 +32,25 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>DXF Drawing</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.alimomeni.drawncut.dxf</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dxf</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 </dict>
 </plist>

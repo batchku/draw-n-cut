@@ -120,7 +120,9 @@ enum TraceEngine {
         let rawLength = raw.reduce(0) { $0 + $1.length }
         let strokeWidth = rawLength > 0 ? Double(component.area) / rawLength : 1
         let despurred = raw.filter { $0.isClosed || $0.length > 1.5 * strokeWidth }
-        let repaired = Skeletonizer.mergedChains(despurred, tolerance: 2.5)
+        // Merge tolerance scales with the pen: a fat marker's arcs land
+        // farther apart at junctions than a fine liner's.
+        let repaired = Skeletonizer.mergedChains(despurred, tolerance: max(2.5, 0.75 * strokeWidth))
 
         var processed: [Polyline] = repaired
             .filter { $0.length >= parameters.minPolylineLength }

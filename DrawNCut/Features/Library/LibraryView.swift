@@ -45,9 +45,7 @@ struct LibraryView: View {
     private var projectList: some View {
         List {
             ForEach(store.projects) { project in
-                Button {
-                    path.append(.trace(projectID: project.id))
-                } label: {
+                NavigationLink(value: Route.trace(projectID: project.id)) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(project.title)
                             .font(.headline)
@@ -63,7 +61,7 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                     }
                 }
-                .buttonStyle(.plain)
+                .accessibilityIdentifier("projectRow")
             }
             .onDelete { offsets in
                 for offset in offsets {

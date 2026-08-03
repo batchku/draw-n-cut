@@ -40,6 +40,16 @@ targets:
         UIRequiresFullScreen: true
         NSCameraUsageDescription: Draw'n'Cut uses the camera to photograph drawings so they can be traced and laser cut.
         NSPhotoLibraryUsageDescription: Draw'n'Cut can import existing photos of drawings from your photo library.
+        # Registers .dxf so exports keep their extension and icon everywhere
+        # (share sheet, Files, AirDrop).
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: com.alimomeni.drawncut.dxf
+            UTTypeDescription: DXF Drawing
+            UTTypeConformsTo:
+              - public.data
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - dxf
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.alimomeni.drawncut

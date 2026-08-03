@@ -12,6 +12,7 @@ struct TraceView: View {
     @State private var showPhoto = false
     @State private var showExport = false
     @State private var saveConfirmation = false
+    @State private var eraserMode = false
 
     var body: some View {
         Group {
@@ -35,7 +36,7 @@ struct TraceView: View {
     @ViewBuilder
     private func content(_ session: TraceSession) -> some View {
         VStack(spacing: 0) {
-            TraceCanvas(session: session, showPhoto: showPhoto)
+            TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) {
                     if session.pendingSuggestionCount > 0 && !session.suggestionsApplied {
@@ -88,22 +89,31 @@ struct TraceView: View {
                 Image(systemName: "circle.grid.cross.fill")
                     .foregroundStyle(.secondary)
             }
-            HStack {
+            HStack(spacing: 16) {
                 Text("Detail")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                if !session.eraseTaps.isEmpty {
-                    Button {
-                        session.undoErase()
-                    } label: {
-                        Label("Undo erase", systemImage: "arrow.uturn.backward")
-                            .font(.caption)
-                    }
-                }
-                Text("Tap a line to erase it")
+                Text(eraserMode ? "Sweep over lines to erase • two-finger tap undoes" : "")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                Button {
+                    session.undoErase()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward.circle.fill")
+                        .font(.title2)
+                }
+                .disabled(session.eraseTaps.isEmpty)
+                .accessibilityLabel("Undo erase")
+                Button {
+                    eraserMode.toggle()
+                } label: {
+                    Image(systemName: eraserMode ? "eraser.fill" : "eraser")
+                        .font(.title2)
+                        .foregroundStyle(eraserMode ? Color.accentColor : Color.secondary)
+                }
+                .accessibilityLabel(eraserMode ? "Eraser on" : "Eraser off")
+                .accessibilityIdentifier("eraserToggle")
             }
         }
         .padding()
@@ -178,6 +188,7 @@ struct TraceView: View {
 private struct TraceCanvas: View {
     let session: TraceSession
     let showPhoto: Bool
+    let eraserMode: Bool
 
     var body: some View {
         GeometryReader { geometry in
@@ -218,12 +229,16 @@ private struct TraceCanvas: View {
             .accessibilityElement()
             .accessibilityIdentifier("traceCanvas")
             .accessibilityValue("\(session.visible.count) paths")
-            .onTapGesture { location in
-                let imagePoint = SIMD2(
-                    (location.x - fit.offset.width) / fit.scale,
-                    (location.y - fit.offset.height) / fit.scale
-                )
-                session.erase(at: imagePoint)
+            .overlay {
+                TouchOverlay(eraserActive: eraserMode) { location in
+                    let imagePoint = SIMD2(
+                        (location.x - fit.offset.width) / fit.scale,
+                        (location.y - fit.offset.height) / fit.scale
+                    )
+                    session.eraseSweep(at: imagePoint)
+                } onTwoFingerTap: {
+                    session.undoErase()
+                }
             }
         }
         .background(Color(.systemBackground))

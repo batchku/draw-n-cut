@@ -109,8 +109,12 @@ struct BinaryBitmap {
         }
 
         Self.fillDarkHoles(ink: &ink, gray: gray, width: w, height: h)
-        diagnostics.inkPixelCount = ink.reduce(into: 0) { if $1 { $0 += 1 } }
-        self.pixels = ink
+        // Faint strokes (screen photos, light pencil) perforate under the
+        // local threshold; a radius-1 closing re-bridges those pinholes
+        // before the ink is carved into components.
+        let bridged = BinaryBitmap(width: w, height: h, pixels: ink).closed(radius: 1)
+        diagnostics.inkPixelCount = bridged.pixels.reduce(into: 0) { if $1 { $0 += 1 } }
+        self.pixels = bridged.pixels
         report = diagnostics
     }
 
@@ -505,6 +509,23 @@ struct BinaryBitmap {
             }
         }
         return result
+    }
+
+    /// Erosion via the dilation of the inverse. Outside the frame counts as
+    /// background, so border-touching ink shrinks — acceptable for closing.
+    func eroded(radius: Int) -> BinaryBitmap {
+        guard radius > 0 else { return self }
+        var inverted = self
+        for i in inverted.pixels.indices { inverted.pixels[i].toggle() }
+        var result = inverted.dilated(radius: radius)
+        for i in result.pixels.indices { result.pixels[i].toggle() }
+        return result
+    }
+
+    /// Morphological closing: bridges sub-pixel-scale stroke perforations
+    /// (threshold flicker along a faint pen line) without thickening strokes.
+    func closed(radius: Int) -> BinaryBitmap {
+        dilated(radius: radius).eroded(radius: radius)
     }
 
     mutating func intersect(_ mask: BinaryBitmap) {

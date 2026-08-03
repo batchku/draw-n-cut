@@ -189,6 +189,15 @@ final class TraceSession {
         reapplyErasures()
     }
 
+    /// Continuous erasing while a finger sweeps: records a tap only when it
+    /// hits a polyline that isn't already erased, so one sweep produces one
+    /// undo step per removed line rather than hundreds of points.
+    func eraseSweep(at point: SIMD2<Double>) {
+        guard let key = target(near: point), !removedTargets.contains(key) else { return }
+        eraseTaps.append(point)
+        removedTargets.insert(key)
+    }
+
     func undoErase() {
         guard !eraseTaps.isEmpty else { return }
         eraseTaps.removeLast()
