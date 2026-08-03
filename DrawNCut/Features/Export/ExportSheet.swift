@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Pick a physical size, write the DXF, share it. Everything engraves for
-/// now — the cut outline and per-path overrides come with SAM integration.
+/// Pick a physical size, write the DXF, share it. Traced lines engrave; the
+/// sticker outline (when the subject was selected) cuts. Per-path overrides
+/// come with the toggle UI task.
 struct ExportSheet: View {
     let session: TraceSession
 
@@ -30,7 +31,11 @@ struct ExportSheet: View {
                     }
                     .pickerStyle(.segmented)
 
-                    let size = DXFExportBuilder.sizeMM(of: session.visible.map(\.polyline), widthMM: widthMM)
+                    let size = DXFExportBuilder.sizeMM(
+                        of: session.visible.map(\.polyline),
+                        cutOutline: session.cutOutline,
+                        widthMM: widthMM
+                    )
                     LabeledContent("Output", value: "\(Int(size.width)) × \(Int(size.height)) mm")
                 }
 
@@ -57,7 +62,11 @@ struct ExportSheet: View {
                         Text(exportError).font(.footnote).foregroundStyle(.red)
                     }
                 } footer: {
-                    Text("DXF layers: ENGRAVE for all traced lines. The CUT outline arrives with subject-outline support.")
+                    if session.cutOutline != nil {
+                        Text("DXF layers: CUT for the outline around the drawing, ENGRAVE for all traced lines.")
+                    } else {
+                        Text("DXF layers: ENGRAVE for all traced lines. Select the drawing on the outline screen to add a CUT outline.")
+                    }
                 }
             }
             .navigationTitle("Export DXF")

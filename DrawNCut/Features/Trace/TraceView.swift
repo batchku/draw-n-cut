@@ -219,23 +219,20 @@ private struct TraceCanvas: View {
                     context.opacity = 1
                 }
                 for item in session.visible {
-                    var swiftUIPath = Path()
-                    let points = item.polyline.points.map { point in
-                        CGPoint(
-                            x: point.x * scale + offset.width,
-                            y: point.y * scale + offset.height
-                        )
-                    }
-                    guard let first = points.first else { continue }
-                    swiftUIPath.move(to: first)
-                    for point in points.dropFirst() { swiftUIPath.addLine(to: point) }
-                    if item.polyline.isClosed { swiftUIPath.closeSubpath() }
-
                     let style = color(for: item.suggestion)
                     context.stroke(
-                        swiftUIPath,
+                        path(for: item.polyline, scale: scale, offset: offset),
                         with: .color(style.color),
                         lineWidth: style.emphasized ? 3 : 1.5
+                    )
+                }
+                // The sticker CUT outline — drawn last so it reads as the
+                // piece's edge. Not erasable: it isn't a traced polyline.
+                if let outline = session.cutOutline {
+                    context.stroke(
+                        path(for: outline, scale: scale, offset: offset),
+                        with: .color(.green),
+                        lineWidth: 3
                     )
                 }
             }
@@ -285,6 +282,21 @@ private struct TraceCanvas: View {
         let minY = viewport.height * (1 - zoom)
         panOffset.width = min(0, max(minX, panOffset.width))
         panOffset.height = min(0, max(minY, panOffset.height))
+    }
+
+    private func path(for polyline: Polyline, scale: Double, offset: CGSize) -> Path {
+        var swiftUIPath = Path()
+        let points = polyline.points.map { point in
+            CGPoint(
+                x: point.x * scale + offset.width,
+                y: point.y * scale + offset.height
+            )
+        }
+        guard let first = points.first else { return swiftUIPath }
+        swiftUIPath.move(to: first)
+        for point in points.dropFirst() { swiftUIPath.addLine(to: point) }
+        if polyline.isClosed { swiftUIPath.closeSubpath() }
+        return swiftUIPath
     }
 
     private func color(for suggestion: RemovalReason?) -> (color: Color, emphasized: Bool) {

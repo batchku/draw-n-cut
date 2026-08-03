@@ -22,10 +22,19 @@ final class TraceSession {
         let polylineIndex: Int
     }
 
+    /// Offset of the sticker cut outline from the mask boundary, as a
+    /// fraction of the image diagonal (≈7.5 mm on an A4-width drawing).
+    static let cutOutlineOffsetFraction = 0.03
+
     private let store: ProjectStore
     private(set) var project: DrawingProject
     private(set) var image: CGImage?
     private(set) var result: TraceResult?
+    /// Subject mask in trace space; ink outside it is ignored while tracing.
+    private var mask: BinaryBitmap?
+    /// The sticker-style CUT outline derived from the mask; nil when the
+    /// user traced everything. Not erasable — it is the piece's edge.
+    private(set) var cutOutline: Polyline?
     private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
     private(set) var isTracing = false
@@ -66,6 +75,7 @@ final class TraceSession {
         TraceLog.log("loaded \(url.lastPathComponent) → \(cgImage.width)x\(cgImage.height)", file: diagnosticsURL)
         image = cgImage
         textRegions = []
+        await loadMask(for: cgImage)
         scheduleRetrace(debounce: false)
         // Text detection is slower than tracing; fold results in when ready.
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
@@ -79,6 +89,31 @@ final class TraceSession {
         }
     }
 
+    /// Reads the project's `mask.png` (written by the refine screen) into
+    /// trace space and derives the sticker cut outline from it. No file, no
+    /// mask: the whole photo traces, as before.
+    private func loadMask(for cgImage: CGImage) async {
+        let maskURL = store.maskURL(for: project)
+        guard FileManager.default.fileExists(atPath: maskURL.path) else {
+            mask = nil
+            cutOutline = nil
+            return
+        }
+        let traceSpace = BinaryBitmap.traceSize(for: cgImage)
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, Polyline?)? in
+            guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
+            let diagonal = Double(hypot(traceSpace.width, traceSpace.height))
+            let offset = max(1, Int(Self.cutOutlineOffsetFraction * diagonal))
+            return (bitmap, MaskGeometry.stickerOutline(around: bitmap, offsetPixels: offset))
+        }.value
+        mask = loaded?.0
+        cutOutline = loaded?.1
+        TraceLog.log(
+            "mask \(loaded == nil ? "FAILED to load" : "loaded"), cut outline \(cutOutline == nil ? "absent" : "\(cutOutline!.points.count) points")",
+            file: diagnosticsURL
+        )
+    }
+
     // MARK: - Tracing
 
     private func scheduleRetrace(debounce: Bool) {
@@ -86,6 +121,7 @@ final class TraceSession {
         retraceTask?.cancel()
         let detail = detail
         let regions = textRegions
+        let mask = mask
         isTracing = true
         retraceTask = Task { [weak self] in
             if debounce {
@@ -95,7 +131,7 @@ final class TraceSession {
             // Trace, classify, and detect all off the main actor — in a debug
             // build this is seconds of work on a full-page scan.
             let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason])? in
-                guard let traced = TraceEngine.trace(image: image, detail: detail) else { return nil }
+                guard let traced = TraceEngine.trace(image: image, mask: mask, detail: detail) else { return nil }
                 let classification = ElementClassifier.classify(traced)
                 let suggestions = NonSubjectDetector.suggestions(
                     for: classification,
@@ -343,11 +379,11 @@ final class TraceSession {
     // MARK: - Export
 
     /// Writes the current visible trace as a DXF sized to `widthMM`, returns
-    /// the file URL. All paths engrave for now; the cut outline arrives with
-    /// SAM mask integration, and per-path overrides with the toggle UI task.
+    /// the file URL. The sticker outline (when present) lands on the CUT
+    /// layer; everything traced engraves. Per-path overrides are a later task.
     func exportDXF(widthMM: Double) throws -> URL {
         let polylines = visible.map(\.polyline)
-        let dxf = DXFExportBuilder.dxf(from: polylines, widthMM: widthMM)
+        let dxf = DXFExportBuilder.dxf(from: polylines, cutOutline: cutOutline, widthMM: widthMM)
         let directory = store.exportsDirectory(for: project)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let existing = (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.count ?? 0
