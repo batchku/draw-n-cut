@@ -24,7 +24,7 @@ final class TraceSession {
 
     /// Offset of the sticker cut outline from the mask boundary, as a
     /// fraction of the image diagonal (≈7.5 mm on an A4-width drawing).
-    static let cutOutlineOffsetFraction = 0.03
+    nonisolated static let cutOutlineOffsetFraction = 0.03
 
     private let store: ProjectStore
     private(set) var project: DrawingProject
