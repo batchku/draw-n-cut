@@ -57,7 +57,11 @@ final class TraceSession {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: 2000,
         ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return }
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            TraceLog.log("load FAILED for \(url.lastPathComponent)", file: diagnosticsURL)
+            return
+        }
+        TraceLog.log("loaded \(url.lastPathComponent) → \(cgImage.width)x\(cgImage.height)", file: diagnosticsURL)
         image = cgImage
         textRegions = []
         scheduleRetrace(debounce: false)
@@ -103,11 +107,34 @@ final class TraceSession {
             self.suggestionsByTarget = byTarget
             self.isTracing = false
             self.reapplyErasures()
+            self.logTraceOutcome(traced, suggestionCount: byTarget.count)
             // Text regions may have landed while this trace was running.
             if self.textRegions != regions {
                 self.refreshSuggestions()
             }
         }
+    }
+
+    private var diagnosticsURL: URL {
+        store.directory(for: project).appending(path: "diagnostics.log")
+    }
+
+    private func logTraceOutcome(_ traced: TraceResult, suggestionCount: Int) {
+        var binarization = "binarization=?"
+        if let report = traced.binarization {
+            binarization = "ink=\(report.inkPixelCount) mask=\(report.paperMaskActive ? "on(\(Int(report.paperCoverage * 100))%)" : "off") sep=\(Int(report.otsuClassSeparation)) border=\(Int(report.paperSurroundContrast))"
+        }
+        let polylineCount = traced.elements.reduce(0) { $0 + $1.polylines.count }
+        TraceLog.log(
+            "traced detail=\(String(format: "%.2f", detail)) → \(traced.elements.count) elements, \(polylineCount) polylines, \(suggestionCount) suggestions | \(binarization)",
+            file: diagnosticsURL
+        )
+        let visiblePolylines = visible.map(\.polyline)
+        TracePreviewRenderer.write(
+            polylines: visiblePolylines,
+            imageSize: traced.imageSize,
+            to: store.directory(for: project).appending(path: "trace-preview.png")
+        )
     }
 
     nonisolated private static func targets(for suggestions: [RemovalSuggestion], in result: TraceResult) -> [TargetKey: RemovalReason] {

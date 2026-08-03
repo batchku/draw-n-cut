@@ -111,6 +111,63 @@ struct PhotoTraceTests {
         }
     }
 
+    /// A real handheld photo where the page fills the entire frame, with
+    /// soft lighting bands falling across it. (Regression: Otsu split the
+    /// lit band from the shadowed band, the "largest bright region" became
+    /// one lighting band, and the paper mask deleted the whole drawing —
+    /// the user saw "Nothing to Trace".)
+    @Test(.timeLimit(.minutes(1)))
+    func fullFramePagePhotoKeepsItsDrawing() throws {
+        let image = try FixtureTraceTests.fixtureImage("fish-photo", extension: "jpg")
+        let result = try #require(TraceEngine.trace(image: image, detail: 0.7))
+
+        #expect(result.elements.count >= 6, "got \(result.elements.count) elements")
+        let totalInk = result.elements.reduce(0) { $0 + $1.inkArea }
+        #expect(totalInk >= 20_000, "total ink \(totalInk)")
+
+        let imagePixels = Int(result.imageSize.width) * Int(result.imageSize.height)
+        for element in result.elements {
+            #expect(element.inkArea <= imagePixels * 8 / 100, "inkArea \(element.inkArea)")
+            let coversFrame = element.boundingBox.width > 0.8 * result.imageSize.width
+                && element.boundingBox.height > 0.8 * result.imageSize.height
+            #expect(!coversFrame, "frame-sized bbox \(element.boundingBox)")
+        }
+
+        // The drawing (fish + enclosing circle + label) sits mid-frame; the
+        // union of the traced elements must cover it.
+        var union = CGRect.null
+        for element in result.elements { union = union.union(element.boundingBox) }
+        let drawingArea = CGRect(
+            x: 0.30 * result.imageSize.width, y: 0.35 * result.imageSize.height,
+            width: 0.35 * result.imageSize.width, height: 0.30 * result.imageSize.height
+        )
+        #expect(union.contains(drawingArea), "union \(union) misses the drawing at \(drawingArea)")
+
+        // A page filling the frame offers no darker surround: the paper mask
+        // must not fire on the page's own lighting bands.
+        let report = try #require(result.binarization)
+        #expect(!report.paperMaskActive)
+
+        try SVGDump.write(result: result, name: "fish-photo-detail-0.7")
+    }
+
+    /// The diagnostics surface: paper on a dark table activates the mask
+    /// and the report says so, carrying the statistics the gating read.
+    @Test(.timeLimit(.minutes(1)))
+    func binarizationReportRecordsMaskDecision() throws {
+        let scan = try FixtureTraceTests.fixtureImage("animals-page-1")
+        let photo = PhotoComposite.photo(of: scan)
+        let result = try #require(TraceEngine.trace(image: photo.image, detail: 0.7))
+
+        let report = try #require(result.binarization)
+        #expect(report.paperMaskActive)
+        #expect(report.paperCoverage > 0.2 && report.paperCoverage < 0.9,
+                "coverage \(report.paperCoverage)")
+        #expect(report.otsuClassSeparation > 100, "separation \(report.otsuClassSeparation)")
+        #expect(report.paperSurroundContrast > 100, "surround \(report.paperSurroundContrast)")
+        #expect(report.inkPixelCount > 0)
+    }
+
     @Test func hugeFilledRegionIsDroppedNotSkeletonized() throws {
         let image = TestCanvas.image(size: 800) { ctx in
             ctx.setLineWidth(5)

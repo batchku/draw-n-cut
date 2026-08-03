@@ -1,6 +1,19 @@
 import CoreGraphics
 import Foundation
 
+/// What binarization decided for one frame, so callers can explain results
+/// ("Nothing to Trace" because the paper mask fired vs. because the page is
+/// blank) instead of guessing. `paperCoverage` is the fraction of the frame
+/// the applied mask kept, 0 while the mask is inactive; the two contrast
+/// figures are the statistics the mask gating read, in gray levels.
+struct BinarizationReport: Sendable {
+    var inkPixelCount: Int
+    var paperMaskActive: Bool
+    var paperCoverage: Double
+    var otsuClassSeparation: Double
+    var paperSurroundContrast: Double
+}
+
 /// A 1-bit ink bitmap: `true` means ink. The raster substrate for tracing —
 /// built from a photo by grayscale conversion + local adaptive thresholding,
 /// then carved into connected components that become traced elements.
@@ -51,6 +64,13 @@ struct BinaryBitmap {
     /// Downscales so the long edge is at most `maxDimension` — trace quality
     /// doesn't improve past that, and every later stage is O(pixels).
     init?(cgImage: CGImage, maxDimension: Int = 2000) {
+        var report: BinarizationReport? = nil
+        self.init(cgImage: cgImage, maxDimension: maxDimension, report: &report)
+    }
+
+    /// Same as `init?(cgImage:maxDimension:)`, but also fills `report` with
+    /// the decisions made (nil only when the image itself fails to render).
+    init?(cgImage: CGImage, maxDimension: Int = 2000, report: inout BinarizationReport?) {
         let size = Self.traceSize(for: cgImage, maxDimension: maxDimension)
         let w = Int(size.width)
         let h = Int(size.height)
@@ -80,12 +100,18 @@ struct BinaryBitmap {
         // A handheld photo has content only on the paper; whatever the local
         // threshold picked up around it (the paper's own contrast edge, table
         // texture) is garbage.
-        if let paper = Self.paperRegion(gray: gray, width: w, height: h, margin: window / 2) {
+        var diagnostics = BinarizationReport(
+            inkPixelCount: 0, paperMaskActive: false, paperCoverage: 0,
+            otsuClassSeparation: 0, paperSurroundContrast: 0
+        )
+        if let paper = Self.paperRegion(gray: gray, width: w, height: h, margin: window / 2, report: &diagnostics) {
             for i in ink.indices where !paper[i] { ink[i] = false }
         }
 
         Self.fillDarkHoles(ink: &ink, gray: gray, width: w, height: h)
+        diagnostics.inkPixelCount = ink.reduce(into: 0) { if $1 { $0 += 1 } }
         self.pixels = ink
+        report = diagnostics
     }
 
     /// Pixels darker than a cut 60% of the way from the local window mean
@@ -170,18 +196,82 @@ struct BinaryBitmap {
     }
 
     /// The single dominant bright region — the paper in a handheld photo —
-    /// eroded inward by `margin`, or nil when the frame is (nearly) all
-    /// paper as a flatbed scan is, so scans keep their exact behavior.
+    /// eroded inward by `margin`, or nil when the frame lacks genuine
+    /// paper-on-darker-surround evidence. Otsu always produces *a* split, so
+    /// activation is gated on what the split actually separated (values
+    /// measured on the fixtures):
+    /// - Class separation: lighting bands across one surface sit close
+    ///   together; paper against a dark table separates by 150+ levels
+    ///   (composites: 177). Below 55 there is only one surface — don't mask.
+    /// - Surround darkness: a page filling the frame puts paper at the
+    ///   border, so the border median lands within a shadow's depth of the
+    ///   paper median (fish-photo: 13 apart, despite a separation of 79
+    ///   because Otsu split its lit band from its shadowed band); a real
+    ///   table sits far below (composites: 191 apart). Under 50 apart the
+    ///   "surround" is the paper itself — don't mask.
+    /// When masking is justified, the region is rebuilt at a threshold
+    /// relaxed toward the border brightness rather than the hard Otsu cut,
+    /// so shadow bands on the paper — brighter than any table that passed
+    /// the gate — stay inside the region and keep the marks under them.
+    /// The scan guard remains: a frame that is (nearly) all paper, as on a
+    /// flatbed, never masks, so scans keep their exact behavior.
     /// The erosion matters: within half a window of the paper's edge the
     /// step to the table dominates local statistics, so the paper's own
     /// anti-aliased boundary and edge shadows read as "locally dark" there.
     private static func paperRegion(
-        gray: [UInt8], width w: Int, height h: Int, margin: Int
+        gray: [UInt8], width w: Int, height h: Int, margin: Int, report: inout BinarizationReport
     ) -> [Bool]? {
         let total = w * h
         var histogram = [Int](repeating: 0, count: 256)
         for value in gray { histogram[Int(value)] += 1 }
         let split = otsuThreshold(histogram: histogram, total: total)
+
+        var darkSum = 0.0, darkWeight = 0.0, brightSum = 0.0, brightWeight = 0.0
+        for value in 0..<256 {
+            let weight = Double(histogram[value])
+            if value < split {
+                darkSum += Double(value) * weight
+                darkWeight += weight
+            } else {
+                brightSum += Double(value) * weight
+                brightWeight += weight
+            }
+        }
+        guard darkWeight > 0, brightWeight > 0 else { return nil }
+        let separation = brightSum / brightWeight - darkSum / darkWeight
+        report.otsuClassSeparation = separation
+
+        func median(of histogram: [Int]) -> Int {
+            let count = histogram.reduce(0, +)
+            var seen = 0
+            for value in 0..<256 {
+                seen += histogram[value]
+                if seen * 2 >= count { return value }
+            }
+            return 255
+        }
+        // The border band is thin so that a paper edge cropped by the frame
+        // (one side of the border being paper) can't drag the median up.
+        let band = max(2, margin / 4)
+        var borderHistogram = [Int](repeating: 0, count: 256)
+        for y in 0..<h {
+            let edgeRow = y < band || y >= h - band
+            for x in 0..<w where edgeRow || x < band || x >= w - band {
+                borderHistogram[Int(gray[y * w + x])] += 1
+            }
+        }
+        let borderMedian = median(of: borderHistogram)
+        var brightHistogram = histogram
+        for value in 0..<split { brightHistogram[value] = 0 }
+        let paperMedian = median(of: brightHistogram)
+        report.paperSurroundContrast = Double(paperMedian - borderMedian)
+
+        if separation < 55 { return nil }
+        if paperMedian - borderMedian < 50 { return nil }
+
+        // Rebuilding at the relaxed cut keeps shadowed paper bright enough
+        // to stay "paper" while everything table-dark stays out.
+        let relaxed = min(split, borderMedian + max(25, (paperMedian - borderMedian) / 3))
 
         // Largest 4-connected bright region.
         var labels = [Int32](repeating: 0, count: total)
@@ -189,12 +279,12 @@ struct BinaryBitmap {
         var bestLabel: Int32 = 0
         var bestCount = 0
         var stack: [Int] = []
-        for start in 0..<total where Int(gray[start]) >= split && labels[start] == 0 {
+        for start in 0..<total where Int(gray[start]) >= relaxed && labels[start] == 0 {
             var count = 0
             labels[start] = nextLabel
             stack.append(start)
             func visit(_ neighbor: Int) {
-                if Int(gray[neighbor]) >= split && labels[neighbor] == 0 {
+                if Int(gray[neighbor]) >= relaxed && labels[neighbor] == 0 {
                     labels[neighbor] = nextLabel
                     stack.append(neighbor)
                 }
@@ -291,7 +381,15 @@ struct BinaryBitmap {
                 distance[index] = d
             }
         }
-        return distance.map { $0 > margin }
+        var mask = [Bool](repeating: false, count: total)
+        var covered = 0
+        for index in 0..<total where distance[index] > margin {
+            mask[index] = true
+            covered += 1
+        }
+        report.paperMaskActive = true
+        report.paperCoverage = Double(covered) / Double(total)
+        return mask
     }
 
     /// The adaptive window saturates inside solid fills larger than itself

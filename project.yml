@@ -9,6 +9,8 @@ settings:
     SWIFT_VERSION: "5.10"
     TARGETED_DEVICE_FAMILY: "1"
     GENERATE_INFOPLIST_FILE: false
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: V9DBGV72NL
   configs:
     # The trace pipeline is heavy numeric Swift; unoptimized it takes tens of
     # seconds per page. Keep -O in Debug so on-device testing feels real.
@@ -23,6 +25,11 @@ targets:
     platform: iOS
     sources:
       - DrawNCut
+      # Real-photo fixture bundled for the DEMO_IMAGE=bundled: test hook.
+      - path: Fixtures
+        buildPhase: resources
+        includes:
+          - "fish-photo.jpg"
     info:
       path: DrawNCut/Info.plist
       properties:
@@ -49,6 +56,17 @@ targets:
         buildPhase: resources
         includes:
           - "*.png"
+          - "*.jpg"
+    dependencies:
+      - target: DrawNCut
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+  DrawNCutUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - DrawNCutUITests
     dependencies:
       - target: DrawNCut
     settings:
@@ -65,3 +83,4 @@ schemes:
       config: Debug
       targets:
         - DrawNCutTests
+        - DrawNCutUITests

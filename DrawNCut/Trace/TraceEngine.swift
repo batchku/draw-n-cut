@@ -57,6 +57,9 @@ struct TraceResult {
     var elements: [TracedElement]
     var imageSize: CGSize
     var parameters: TraceParameters
+    /// What binarization decided; nil when the result was built from an
+    /// already-binarized bitmap rather than an image.
+    var binarization: BinarizationReport? = nil
 }
 
 /// Photo (or masked photo) in, centerline vector elements out.
@@ -67,7 +70,8 @@ enum TraceEngine {
     ///     image); ink outside the mask is ignored.
     ///   - detail: the single user-facing slider, 0...1.
     static func trace(image: CGImage, mask: BinaryBitmap? = nil, detail: Double) -> TraceResult? {
-        guard var bitmap = BinaryBitmap(cgImage: image) else { return nil }
+        var report: BinarizationReport?
+        guard var bitmap = BinaryBitmap(cgImage: image, report: &report) else { return nil }
         if let mask {
             bitmap.intersect(mask)
         }
@@ -79,7 +83,8 @@ enum TraceEngine {
         return TraceResult(
             elements: elements,
             imageSize: CGSize(width: bitmap.width, height: bitmap.height),
-            parameters: parameters
+            parameters: parameters,
+            binarization: report
         )
     }
 

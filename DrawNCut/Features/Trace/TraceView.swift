@@ -215,6 +215,9 @@ private struct TraceCanvas: View {
                 }
             }
             .contentShape(Rectangle())
+            .accessibilityElement()
+            .accessibilityIdentifier("traceCanvas")
+            .accessibilityValue("\(session.visible.count) paths")
             .onTapGesture { location in
                 let imagePoint = SIMD2(
                     (location.x - fit.offset.width) / fit.scale,
