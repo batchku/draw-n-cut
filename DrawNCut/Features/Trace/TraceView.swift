@@ -251,10 +251,10 @@ private struct TraceCanvas: View {
                         lineWidth: style.emphasized ? 3 : 1.5
                     )
                 }
-                // The sticker CUT outline — drawn last so it reads as the
-                // piece's edge. Red like the DXF CUT layer. Not erasable:
-                // it isn't a traced polyline.
-                if let outline = session.cutOutline {
+                // The CUT loops (piece edges and holes) — drawn last so they
+                // read as the piece's edges. Red like the DXF CUT layer. Not
+                // erasable: they aren't traced polylines.
+                for outline in session.cutOutlines {
                     context.stroke(
                         path(for: outline, scale: scale, offset: offset),
                         with: .color(.red),

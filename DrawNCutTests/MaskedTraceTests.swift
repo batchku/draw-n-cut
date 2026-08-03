@@ -104,8 +104,8 @@ struct MaskedTraceTests {
         for element in result.elements {
             #expect(maskBox.insetBy(dx: -2, dy: -2).contains(element.boundingBox))
         }
-        let outline = try #require(session.cutOutline)
-        #expect(outline.isClosed)
+        let outline = try #require(session.cutOutlines.first)
+        #expect(session.cutOutlines.allSatisfy { $0.isClosed })
         // The cut runs ON the mask's silhouette (offset 0): a point just
         // inside the rim is enclosed, and the outline's box matches the
         // mask's box within simplify/smoothing slack.
@@ -125,7 +125,7 @@ struct MaskedTraceTests {
         let outline = Polyline(
             points: [SIMD2(0, 0), SIMD2(100, 0), SIMD2(100, 100), SIMD2(0, 100)], isClosed: true)
 
-        let paths = DXFExportBuilder.vectorPaths(from: [engrave], cutOutline: outline, widthMM: 100)
+        let paths = DXFExportBuilder.vectorPaths(from: [engrave], cutOutlines: [outline], widthMM: 100)
         #expect(paths.count == 2)
         #expect(paths[0].role == .engrave)
         #expect(paths[1].role == .cut)
@@ -137,7 +137,7 @@ struct MaskedTraceTests {
         let plain = DXFExportBuilder.vectorPaths(from: [engrave], widthMM: 100)
         #expect(plain.count == 1 && plain[0].role == .engrave)
 
-        let dxf = DXFExportBuilder.dxf(from: [engrave], cutOutline: outline, widthMM: 100)
+        let dxf = DXFExportBuilder.dxf(from: [engrave], cutOutlines: [outline], widthMM: 100)
         #expect(dxf.contains("CUT") && dxf.contains("ENGRAVE"))
     }
 }

@@ -102,6 +102,37 @@ struct MaskGeometryTests {
         #expect(MaskGeometry.outerContour(of: BinaryBitmap(width: 50, height: 50)) == nil)
     }
 
+    // MARK: - Cut contours (every piece, every hole, always closed)
+
+    @Test func fragmentedMaskCutsEveryPieceButNotNoise() throws {
+        var bitmap = Self.disc(width: 200, height: 100, center: SIMD2(55, 50), radius: 25)
+        Self.rect(CGRect(x: 130, y: 30, width: 40, height: 40), in: &bitmap)   // second piece
+        Self.rect(CGRect(x: 100, y: 10, width: 6, height: 6), in: &bitmap)     // noise speck
+        let loops = MaskGeometry.cutContours(of: bitmap)
+        #expect(loops.count == 2, "one loop per significant piece, none for the speck")
+        #expect(loops.allSatisfy { $0.isClosed })
+        #expect(loops.contains { PathGeometry.polygon($0.points, contains: SIMD2(55, 50)) })
+        #expect(loops.contains { PathGeometry.polygon($0.points, contains: SIMD2(150, 50)) })
+    }
+
+    @Test func donutCutsItsHoleToo() throws {
+        var bitmap = Self.disc(width: 100, height: 100, center: SIMD2(50, 50), radius: 30)
+        for y in 0..<100 {
+            for x in 0..<100
+            where simd_length(SIMD2(Double(x), Double(y)) - SIMD2(50, 50)) <= 12 {
+                bitmap[x, y] = false
+            }
+        }
+        let loops = MaskGeometry.cutContours(of: bitmap)
+        #expect(loops.count == 2, "the outer edge plus the hole")
+        #expect(loops.allSatisfy { $0.isClosed })
+        let boxes = loops.map { PathGeometry.boundingBox(of: $0.points) }
+        let outer = try #require(boxes.max(by: { $0.width < $1.width }))
+        let hole = try #require(boxes.min(by: { $0.width < $1.width }))
+        #expect(outer.width >= 55, "outer loop must span the disc")
+        #expect(hole.width >= 16 && hole.width <= 30, "hole loop must span the punched hole")
+    }
+
     // MARK: - Sticker offset
 
     @Test func stickerOffsetGrowsBBoxByTwiceOffsetAndContainsMask() throws {

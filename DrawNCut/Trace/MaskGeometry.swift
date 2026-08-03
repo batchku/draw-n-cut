@@ -44,6 +44,47 @@ enum MaskGeometry {
         return Polyline(points: points.map { $0 + offset }, isClosed: true)
     }
 
+    /// Every closed cut boundary of a mask: one outer contour per significant
+    /// region — a fragmented mask cuts as several pieces rather than silently
+    /// dropping all but the largest — plus one contour per enclosed hole
+    /// (a background region sealed away from the frame border) big enough to
+    /// cut. Every loop is a raster contour, so every loop is closed.
+    static func cutContours(
+        of bitmap: BinaryBitmap,
+        simplifyTolerance: Double = 1.5,
+        smoothingPasses: Int = 1
+    ) -> [Polyline] {
+        let total = bitmap.width * bitmap.height
+        // Below this a region is segmentation noise, not a piece — a speck
+        // this small would burn away, not cut out.
+        let minArea = max(64, total / 2000)
+        var loops = bitmap.inkComponents(minArea: minArea).map(closedContour(of:))
+        guard !loops.isEmpty else { return [] }
+
+        // Holes: the background regions that never reach the frame border.
+        var inverted = BinaryBitmap(width: bitmap.width, height: bitmap.height)
+        for i in 0..<total where !bitmap.pixels[i] { inverted.pixels[i] = true }
+        for component in inverted.inkComponents(minArea: minArea) {
+            let touchesBorder = component.origin.x == 0 || component.origin.y == 0
+                || component.origin.x + component.size.width >= bitmap.width
+                || component.origin.y + component.size.height >= bitmap.height
+            guard !touchesBorder else { continue }
+            loops.append(closedContour(of: component))
+        }
+
+        return loops.compactMap { loop in
+            guard loop.points.count >= 3 else { return nil }
+            let simplified = PathGeometry.simplified(loop, tolerance: simplifyTolerance)
+            return PathGeometry.smoothed(simplified, passes: smoothingPasses)
+        }
+    }
+
+    private static func closedContour(of component: InkComponent) -> Polyline {
+        let points = mooreContour(of: component.localBitmap())
+        let offset = SIMD2(Double(component.origin.x), Double(component.origin.y))
+        return Polyline(points: points.map { $0 + offset }, isClosed: true)
+    }
+
     /// Sticker-style outline: grow the mask by `offsetPixels` (round kernel),
     /// then take the outer contour of the grown region, simplified and
     /// smoothed. Dilating before contouring is what keeps the offset robust —

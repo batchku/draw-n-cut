@@ -33,7 +33,7 @@ struct ExportSheet: View {
 
                     let size = DXFExportBuilder.sizeMM(
                         of: session.visible.map(\.polyline),
-                        cutOutline: session.cutOutline,
+                        cutOutlines: session.cutOutlines,
                         widthMM: widthMM
                     )
                     LabeledContent("Output", value: "\(Int(size.width)) × \(Int(size.height)) mm")
@@ -62,8 +62,8 @@ struct ExportSheet: View {
                         Text(exportError).font(.footnote).foregroundStyle(.red)
                     }
                 } footer: {
-                    if session.cutOutline != nil {
-                        Text("DXF layers: CUT for the outline around the drawing, ENGRAVE for all traced lines.")
+                    if !session.cutOutlines.isEmpty {
+                        Text("DXF layers: CUT for the piece's outline (and any holes), ENGRAVE for all traced lines.")
                     } else {
                         Text("DXF layers: ENGRAVE for all traced lines. Select the drawing on the outline screen to add a CUT outline.")
                     }

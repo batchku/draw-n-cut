@@ -33,11 +33,12 @@ final class TraceSession {
     private(set) var result: TraceResult?
     /// Subject mask in trace space; ink outside it is ignored while tracing.
     private var mask: BinaryBitmap?
-    /// The CUT outline: the segmentation mask's boundary — the figure's own
-    /// silhouette — closed by construction (it is a raster contour). Nil when
-    /// the project has no mask; the outline comes from segmentation or not
-    /// at all. Not erasable: it is the piece's edge.
-    private(set) var cutOutline: Polyline?
+    /// The CUT boundaries: the segmentation mask's silhouette — one closed
+    /// loop per mask region plus one per enclosed hole, all raster contours
+    /// and therefore closed by construction. Empty when the project has no
+    /// mask; the outline comes from segmentation or not at all. Not
+    /// erasable: they are the piece's edges.
+    private(set) var cutOutlines: [Polyline] = []
     private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
     /// Traced polylines that just re-draw the cut outline (the figure's own
@@ -110,22 +111,22 @@ final class TraceSession {
         let maskURL = store.maskURL(for: project)
         guard FileManager.default.fileExists(atPath: maskURL.path) else {
             mask = nil
-            cutOutline = nil
+            cutOutlines = []
             return
         }
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
         let fidelity = outlineDetail
-        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, Polyline?)? in
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, [Polyline])? in
             guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
             // The cut runs exactly on the subject's silhouette — the mask
-            // boundary IS the figure's edge (the deer's outline). A raster
-            // contour, so it is a closed loop no matter what.
-            return (bitmap, Self.outline(of: bitmap, fidelity: fidelity))
+            // boundary IS the figure's edge (the deer's outline). Raster
+            // contours, so every loop is closed no matter what.
+            return (bitmap, Self.outlines(of: bitmap, fidelity: fidelity))
         }.value
         mask = loaded?.0
-        cutOutline = loaded?.1
+        cutOutlines = loaded?.1 ?? []
         TraceLog.log(
-            "mask \(loaded == nil ? "FAILED to load" : "loaded"), cut outline \(cutOutline == nil ? "absent" : "\(cutOutline!.points.count) points")",
+            "mask \(loaded == nil ? "FAILED to load" : "loaded"), \(cutOutlines.count) cut loop(s), \(cutOutlines.reduce(0) { $0 + $1.points.count }) points",
             file: diagnosticsURL
         )
     }
@@ -139,7 +140,7 @@ final class TraceSession {
         let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
-        let outline = cutOutline
+        let outlines = cutOutlines
         isTracing = true
         retraceTask = Task { [weak self] in
             if debounce {
@@ -160,7 +161,7 @@ final class TraceSession {
                     imageSize: traced.imageSize,
                     textRegions: regions
                 )
-                let coincident = outline.map { Self.coincidentTargets(in: traced, outline: $0) } ?? []
+                let coincident = Self.coincidentTargets(in: traced, outlines: outlines)
                 return (traced, Self.targets(for: suggestions, in: traced), coincident)
             }.value
             guard !Task.isCancelled, let self, let (traced, byTarget, coincident) = computed else { return }
@@ -180,13 +181,13 @@ final class TraceSession {
         }
     }
 
-    /// The mask boundary as a polyline, at a given fidelity. 1 hugs every
-    /// raster bump the segmenter produced; 0 simplifies and smooths hard.
-    nonisolated private static func outline(of mask: BinaryBitmap, fidelity: Double) -> Polyline? {
+    /// The mask boundary as closed loops (regions + holes), at a given
+    /// fidelity. 1 hugs every raster bump the segmenter produced; 0
+    /// simplifies and smooths hard.
+    nonisolated private static func outlines(of mask: BinaryBitmap, fidelity: Double) -> [Polyline] {
         let f = max(0, min(1, fidelity))
-        return MaskGeometry.stickerOutline(
-            around: mask,
-            offsetPixels: 0,
+        return MaskGeometry.cutContours(
+            of: mask,
             simplifyTolerance: 8 - (8 - 0.75) * f,
             smoothingPasses: f < 0.5 ? 2 : 1
         )
@@ -202,34 +203,39 @@ final class TraceSession {
         outlineTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
-            let computed = await Task.detached(priority: .userInitiated) { () -> (Polyline?, Set<TargetKey>) in
-                let outline = Self.outline(of: mask, fidelity: fidelity)
+            let computed = await Task.detached(priority: .userInitiated) { () -> ([Polyline], Set<TargetKey>) in
+                let outlines = Self.outlines(of: mask, fidelity: fidelity)
                 var coincident: Set<TargetKey> = []
-                if let outline, let result {
-                    coincident = Self.coincidentTargets(in: result, outline: outline)
+                if let result {
+                    coincident = Self.coincidentTargets(in: result, outlines: outlines)
                 }
-                return (outline, coincident)
+                return (outlines, coincident)
             }.value
             guard !Task.isCancelled, let self else { return }
-            self.cutOutline = computed.0
+            self.cutOutlines = computed.0
             self.outlineTargets = computed.1
         }
     }
 
-    /// Polylines that run along the cut outline — the figure's silhouette
-    /// stroke re-traced as ink. Most of their length sits within a pen width
-    /// of the cut path, so cutting already renders them.
+    /// Polylines that run along a cut loop — the figure's silhouette stroke
+    /// re-traced as ink. Most of their length sits within a pen width of a
+    /// cut path, so cutting already renders them.
     nonisolated private static func coincidentTargets(
-        in result: TraceResult, outline: Polyline
+        in result: TraceResult, outlines: [Polyline]
     ) -> Set<TargetKey> {
-        var edge = outline.points
-        if outline.isClosed, let first = edge.first { edge.append(first) }
-        guard edge.count > 1 else { return [] }
+        let edges: [[SIMD2<Double>]] = outlines.compactMap { outline in
+            var edge = outline.points
+            if outline.isClosed, let first = edge.first { edge.append(first) }
+            return edge.count > 1 ? edge : nil
+        }
+        guard !edges.isEmpty else { return [] }
 
         func isNear(_ point: SIMD2<Double>, within distance: Double) -> Bool {
-            for i in 0..<(edge.count - 1)
-            where PathGeometry.distanceToSegment(point, edge[i], edge[i + 1]) <= distance {
-                return true
+            for edge in edges {
+                for i in 0..<(edge.count - 1)
+                where PathGeometry.distanceToSegment(point, edge[i], edge[i + 1]) <= distance {
+                    return true
+                }
             }
             return false
         }
@@ -491,7 +497,7 @@ final class TraceSession {
     /// layer; everything traced engraves. Per-path overrides are a later task.
     func exportDXF(widthMM: Double) throws -> URL {
         let polylines = visible.map(\.polyline)
-        let dxf = DXFExportBuilder.dxf(from: polylines, cutOutline: cutOutline, widthMM: widthMM)
+        let dxf = DXFExportBuilder.dxf(from: polylines, cutOutlines: cutOutlines, widthMM: widthMM)
         let directory = store.exportsDirectory(for: project)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let existing = (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.count ?? 0
