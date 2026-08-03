@@ -24,13 +24,7 @@ struct RootView: View {
                     case .capture:
                         CaptureView(path: $path)
                     case .refineMask(let projectID):
-                        StagePlaceholderView(
-                            title: "Refine Outline",
-                            systemImage: "lasso.badge.sparkles",
-                            detail: "SAM 2 proposes the subject; tap to add or remove regions.",
-                            next: .trace(projectID: projectID),
-                            path: $path
-                        )
+                        RefineMaskView(path: $path, projectID: projectID)
                     case .trace(let projectID):
                         TraceView(path: $path, projectID: projectID)
                     case .export(let projectID):
@@ -54,9 +48,12 @@ struct RootView: View {
     }
 
     /// Test/demo hook: `DEMO_IMAGE=<path>` in the launch environment creates
-    /// a project from that image and jumps straight to the trace screen.
+    /// a project from that image and jumps straight to the trace screen
+    /// (maskless — existing UI tests depend on landing there).
     /// `DEMO_IMAGE=bundled:<name>` loads `<name>.jpg` from the app bundle,
     /// which works on a physical device where host paths don't exist.
+    /// Adding `DEMO_IMAGE_REFINE=1` stops at the refine-mask screen instead,
+    /// matching the real capture flow.
     private func openDemoImageIfRequested() {
         #if DEBUG
         guard let demoPath = ProcessInfo.processInfo.environment["DEMO_IMAGE"],
@@ -75,7 +72,11 @@ struct RootView: View {
             }
             let project = try store.create(title: "Demo Drawing")
             try data.write(to: store.originalImageURL(for: project), options: .atomic)
-            path = [.trace(projectID: project.id)]
+            if ProcessInfo.processInfo.environment["DEMO_IMAGE_REFINE"] == "1" {
+                path = [.refineMask(projectID: project.id)]
+            } else {
+                path = [.trace(projectID: project.id)]
+            }
         } catch {
             TraceLog.log("demo image failed: \(error)")
         }

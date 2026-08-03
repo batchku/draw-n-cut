@@ -30,6 +30,16 @@ targets:
         buildPhase: resources
         includes:
           - "fish-photo.jpg"
+      # SAM 2 weights (~94 MB, populated by scripts/download-models.sh —
+      # they are git-ignored, so a fresh checkout must run it before
+      # building). Dev-build shipping choice; App Store slimming via
+      # first-run download is a later task (INTEGRATION.md option 1).
+      # buildPhase sources → Xcode precompiles each .mlpackage to .mlmodelc
+      # in the bundle root, which SAM2Segmenter prefers over recompiling.
+      - path: Models
+        buildPhase: sources
+        includes:
+          - "*.mlpackage"
     info:
       path: DrawNCut/Info.plist
       properties:
@@ -53,6 +63,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.alimomeni.drawncut
+        # The SAM2Segmenter wrapper loads models by URL; generated model
+        # classes would only add compile time.
+        COREML_CODEGEN_LANGUAGE: None
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         CODE_SIGN_STYLE: Automatic

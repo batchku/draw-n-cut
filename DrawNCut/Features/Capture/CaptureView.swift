@@ -2,7 +2,7 @@ import PhotosUI
 import SwiftUI
 
 /// Capture a drawing: camera on device, photo library anywhere. Creates the
-/// project, stores the photo, and moves straight into tracing.
+/// project, stores the photo, and moves into subject selection (refine mask).
 /// (Quarter detection and rectification slot in here in a later task.)
 struct CaptureView: View {
     @Environment(ProjectStore.self) private var store
@@ -84,7 +84,7 @@ struct CaptureView: View {
             }
             let project = try store.create(title: "Drawing \(store.projects.count + 1)")
             try jpeg.write(to: store.originalImageURL(for: project), options: .atomic)
-            path = [.trace(projectID: project.id)]
+            path = [.refineMask(projectID: project.id)]
         } catch {
             importError = "Couldn't save the photo: \(error.localizedDescription)"
         }
