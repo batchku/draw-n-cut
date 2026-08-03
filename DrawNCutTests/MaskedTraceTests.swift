@@ -46,7 +46,7 @@ struct MaskedTraceTests {
         // rightly stay outside — a disc's offset outline is a bigger disc,
         // not a rectangle.)
         let diagonal = Double(hypot(traceSpace.width, traceSpace.height))
-        let offset = max(1, Int(TraceSession.cutOutlineOffsetFraction * diagonal))
+        let offset = max(1, Int(0.03 * diagonal))
         let outline = try #require(MaskGeometry.stickerOutline(around: mask, offsetPixels: offset))
         #expect(outline.isClosed)
         for step in 0..<36 {

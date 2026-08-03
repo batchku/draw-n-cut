@@ -82,17 +82,27 @@ struct TraceView: View {
     private func controls(_ session: TraceSession) -> some View {
         @Bindable var session = session
         return VStack(spacing: 10) {
+            // The red cut outline: how faithfully it follows the mask.
+            if session.hasSubjectMask {
+                HStack {
+                    Text("Outline")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .frame(width: 52, alignment: .leading)
+                    Slider(value: $session.outlineDetail, in: 0...1)
+                        .tint(.red)
+                }
+            }
+            // The blue engrave lines: the trace Detail.
             HStack {
-                Image(systemName: "circle.grid.cross")
-                    .foregroundStyle(.secondary)
+                Text("Lines")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+                    .frame(width: 52, alignment: .leading)
                 Slider(value: $session.detail, in: 0...1)
-                Image(systemName: "circle.grid.cross.fill")
-                    .foregroundStyle(.secondary)
+                    .tint(.blue)
             }
             HStack(spacing: 16) {
-                Text("Detail")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 Spacer()
                 Text(eraserMode ? "Circle around things to erase • two-finger tap undoes" : "")
                     .font(.caption2)

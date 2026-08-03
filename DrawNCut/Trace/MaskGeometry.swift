@@ -52,12 +52,13 @@ enum MaskGeometry {
     static func stickerOutline(
         around bitmap: BinaryBitmap,
         offsetPixels: Int,
-        simplifyTolerance: Double = 1.5
+        simplifyTolerance: Double = 1.5,
+        smoothingPasses: Int = 1
     ) -> Polyline? {
         let grown = offsetPixels > 0 ? dilatedRound(bitmap, radius: offsetPixels) : bitmap
         guard let contour = outerContour(of: grown), contour.points.count >= 3 else { return nil }
         let simplified = PathGeometry.simplified(contour, tolerance: simplifyTolerance)
-        return PathGeometry.smoothed(simplified, passes: 1)
+        return PathGeometry.smoothed(simplified, passes: smoothingPasses)
     }
 
     /// Approximately Euclidean dilation via a two-pass 3-4 chamfer distance

@@ -14,6 +14,7 @@ struct TraceSnapshot: Codable {
     /// (as brush dots) so old saved versions keep working.
     var eraseTaps: [[Double]] = []
     var eraseShapes: [EraseShape]? = nil
+    var outlineDetail: Double? = nil
 }
 
 /// Drives the trace screen: owns the image, re-traces when Detail changes,
@@ -26,26 +27,17 @@ final class TraceSession {
         let polylineIndex: Int
     }
 
-    /// Offset of the fallback cut outline from the traced ink, as a fraction
-    /// of the image diagonal (≈7.5 mm on an A4-width drawing). Only used when
-    /// no subject mask exists — with a mask, the cut runs exactly on the
-    /// figure's silhouette.
-    nonisolated static let cutOutlineOffsetFraction = 0.03
-
     private let store: ProjectStore
     private(set) var project: DrawingProject
     private(set) var image: CGImage?
     private(set) var result: TraceResult?
     /// Subject mask in trace space; ink outside it is ignored while tracing.
     private var mask: BinaryBitmap?
-    /// The sticker-style CUT outline around the piece. Derived from the
-    /// subject mask when one exists, otherwise recomputed from the traced
-    /// ink after every re-trace — either way it is a closed loop by
-    /// construction. Not erasable: it is the piece's edge.
+    /// The CUT outline: the segmentation mask's boundary — the figure's own
+    /// silhouette — closed by construction (it is a raster contour). Nil when
+    /// the project has no mask; the outline comes from segmentation or not
+    /// at all. Not erasable: it is the piece's edge.
     private(set) var cutOutline: Polyline?
-    /// The mask-derived outline, stable across re-traces; nil when the user
-    /// traced everything and the outline instead follows the ink.
-    private var subjectOutline: Polyline?
     private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
     /// Traced polylines that just re-draw the cut outline (the figure's own
@@ -58,12 +50,19 @@ final class TraceSession {
     var detail: Double = 0.7 {
         didSet { if oldValue != detail { scheduleRetrace(debounce: true) } }
     }
+    /// Fidelity of the cut outline to the mask boundary: 1 follows every
+    /// bump the segmenter saw, 0 is a heavily smoothed silhouette.
+    var outlineDetail: Double = 0.7 {
+        didSet { if oldValue != outlineDetail { scheduleOutlineRefresh() } }
+    }
+    var hasSubjectMask: Bool { mask != nil }
     /// Every erase gesture, in image space. Rasterized into a mask and
     /// subtracted from the ink before each trace.
     private(set) var eraseShapes: [EraseShape] = []
 
     private var textRegions: [CGRect] = []
     private var retraceTask: Task<Void, Never>?
+    private var outlineTask: Task<Void, Never>?
 
     init(project: DrawingProject, store: ProjectStore) {
         self.project = project
@@ -111,20 +110,19 @@ final class TraceSession {
         let maskURL = store.maskURL(for: project)
         guard FileManager.default.fileExists(atPath: maskURL.path) else {
             mask = nil
-            subjectOutline = nil
             cutOutline = nil
             return
         }
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
+        let fidelity = outlineDetail
         let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, Polyline?)? in
             guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
             // The cut runs exactly on the subject's silhouette — the mask
-            // boundary IS the figure's edge (the deer's outline). Offset 0
-            // still guarantees a closed loop: it is a raster contour.
-            return (bitmap, MaskGeometry.stickerOutline(around: bitmap, offsetPixels: 0))
+            // boundary IS the figure's edge (the deer's outline). A raster
+            // contour, so it is a closed loop no matter what.
+            return (bitmap, Self.outline(of: bitmap, fidelity: fidelity))
         }.value
         mask = loaded?.0
-        subjectOutline = loaded?.1
         cutOutline = loaded?.1
         TraceLog.log(
             "mask \(loaded == nil ? "FAILED to load" : "loaded"), cut outline \(cutOutline == nil ? "absent" : "\(cutOutline!.points.count) points")",
@@ -141,7 +139,7 @@ final class TraceSession {
         let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
-        let subjectOutline = subjectOutline
+        let outline = cutOutline
         isTracing = true
         retraceTask = Task { [weak self] in
             if debounce {
@@ -150,7 +148,7 @@ final class TraceSession {
             guard !Task.isCancelled else { return }
             // Trace, classify, and detect all off the main actor — in a debug
             // build this is seconds of work on a full-page scan.
-            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason], Polyline?, Set<TargetKey>)? in
+            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason], Set<TargetKey>)? in
                 let traceSpace = BinaryBitmap.traceSize(for: image)
                 let eraseMask = EraseMask.bitmap(
                     from: shapes, width: Int(traceSpace.width), height: Int(traceSpace.height))
@@ -162,15 +160,10 @@ final class TraceSession {
                     imageSize: traced.imageSize,
                     textRegions: regions
                 )
-                // Without a subject mask the CUT outline follows whatever ink
-                // survived erasing — recomputed here so it stays closed and
-                // current after every change.
-                let fallback = subjectOutline == nil ? Self.inkOutline(for: traced) : nil
-                let outline = subjectOutline ?? fallback
                 let coincident = outline.map { Self.coincidentTargets(in: traced, outline: $0) } ?? []
-                return (traced, Self.targets(for: suggestions, in: traced), fallback, coincident)
+                return (traced, Self.targets(for: suggestions, in: traced), coincident)
             }.value
-            guard !Task.isCancelled, let self, let (traced, byTarget, fallback, coincident) = computed else { return }
+            guard !Task.isCancelled, let self, let (traced, byTarget, coincident) = computed else { return }
             self.result = traced
             self.suggestionsByTarget = byTarget
             self.isTracing = false
@@ -179,9 +172,6 @@ final class TraceSession {
             // otherwise hide freshly traced neighbors.
             self.removedTargets = []
             self.outlineTargets = coincident
-            if self.subjectOutline == nil {
-                self.cutOutline = fallback
-            }
             self.logTraceOutcome(traced, suggestionCount: byTarget.count)
             // Text regions may have landed while this trace was running.
             if self.textRegions != regions {
@@ -190,29 +180,40 @@ final class TraceSession {
         }
     }
 
-    /// Sticker-style CUT outline around everything traced, used when no
-    /// subject mask exists: rasterize the centerlines at pen width, grow by
-    /// the offset, and contour — closed by construction, unlike any traced
-    /// polyline.
-    nonisolated private static func inkOutline(for result: TraceResult) -> Polyline? {
-        let width = Int(result.imageSize.width), height = Int(result.imageSize.height)
-        guard width > 0, height > 0 else { return nil }
-        var bitmap = BinaryBitmap(width: width, height: height)
-        var inked = false
-        for element in result.elements {
-            let radius = max(1.0, element.estimatedStrokeWidth / 2)
-            for polyline in element.polylines {
-                var points = polyline.points
-                if polyline.isClosed, let first = points.first { points.append(first) }
-                guard !points.isEmpty else { continue }
-                EraseMask.stampStroke(points, radius: radius, into: &bitmap)
-                inked = true
-            }
+    /// The mask boundary as a polyline, at a given fidelity. 1 hugs every
+    /// raster bump the segmenter produced; 0 simplifies and smooths hard.
+    nonisolated private static func outline(of mask: BinaryBitmap, fidelity: Double) -> Polyline? {
+        let f = max(0, min(1, fidelity))
+        return MaskGeometry.stickerOutline(
+            around: mask,
+            offsetPixels: 0,
+            simplifyTolerance: 8 - (8 - 0.75) * f,
+            smoothingPasses: f < 0.5 ? 2 : 1
+        )
+    }
+
+    /// Recomputes the cut outline (and which traced lines it makes
+    /// redundant) when the Outline slider moves.
+    private func scheduleOutlineRefresh() {
+        guard let mask else { return }
+        outlineTask?.cancel()
+        let fidelity = outlineDetail
+        let result = result
+        outlineTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            let computed = await Task.detached(priority: .userInitiated) { () -> (Polyline?, Set<TargetKey>) in
+                let outline = Self.outline(of: mask, fidelity: fidelity)
+                var coincident: Set<TargetKey> = []
+                if let outline, let result {
+                    coincident = Self.coincidentTargets(in: result, outline: outline)
+                }
+                return (outline, coincident)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.cutOutline = computed.0
+            self.outlineTargets = computed.1
         }
-        guard inked else { return nil }
-        let diagonal = Double(hypot(result.imageSize.width, result.imageSize.height))
-        let offset = max(1, Int(cutOutlineOffsetFraction * diagonal))
-        return MaskGeometry.stickerOutline(around: bitmap, offsetPixels: offset)
     }
 
     /// Polylines that run along the cut outline — the figure's silhouette
@@ -423,7 +424,8 @@ final class TraceSession {
     // MARK: - Versions
 
     func saveVersion() throws {
-        let snapshot = TraceSnapshot(detail: detail, eraseShapes: eraseShapes)
+        let snapshot = TraceSnapshot(
+            detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail)
         let data = try JSONEncoder().encode(snapshot)
         _ = try store.addTraceVersion(to: project, detail: detail, pathsData: data)
         syncProject()
@@ -446,6 +448,9 @@ final class TraceSession {
         }
         try? store.setActiveTraceVersion(version, in: project)
         syncProject()
+        if let restored = snapshot.outlineDetail {
+            outlineDetail = restored   // triggers outline refresh when changed
+        }
         if detail == snapshot.detail {
             scheduleRetrace(debounce: false)
         } else {
