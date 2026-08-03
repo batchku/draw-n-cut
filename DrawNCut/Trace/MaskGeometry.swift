@@ -51,6 +51,8 @@ enum MaskGeometry {
     /// cut. Every loop is a raster contour, so every loop is closed.
     static func cutContours(
         of bitmap: BinaryBitmap,
+        snappedTo ink: BinaryBitmap? = nil,
+        snapDistance: Double = 0,
         simplifyTolerance: Double = 1.5,
         smoothingPasses: Int = 1
     ) -> [Polyline] {
@@ -74,9 +76,89 @@ enum MaskGeometry {
 
         return loops.compactMap { loop in
             guard loop.points.count >= 3 else { return nil }
-            let simplified = PathGeometry.simplified(loop, tolerance: simplifyTolerance)
+            var raw = loop
+            if let ink, snapDistance >= 1 {
+                raw = snapped(raw, toInk: ink, interior: bitmap, maxDistance: snapDistance)
+            }
+            let simplified = PathGeometry.simplified(raw, tolerance: simplifyTolerance)
             return PathGeometry.smoothed(simplified, passes: smoothingPasses)
         }
+    }
+
+    /// Pulls each contour point onto the nearest drawn stroke along the local
+    /// interior normal. Segmentation boundaries wander a pen-width-or-three
+    /// off the stroke they followed; the cut must ride the drawing's own
+    /// outline wherever one exists, and only trust the raw mask edge where
+    /// the pen left a gap. Points with no ink within `maxDistance` stay put.
+    static func snapped(
+        _ loop: Polyline, toInk ink: BinaryBitmap, interior mask: BinaryBitmap,
+        maxDistance: Double
+    ) -> Polyline {
+        let count = loop.points.count
+        guard count >= 3, maxDistance >= 1 else { return loop }
+        var normals = [SIMD2<Double>?](repeating: nil, count: count)
+        var hits = [Double?](repeating: nil, count: count)
+        for i in 0..<count {
+            // Tangent over a ±3 window: raw raster contours staircase, and a
+            // single-step tangent would make the normal flip 45° per pixel.
+            let prev = loop.points[(i + count - 3) % count]
+            let next = loop.points[(i + 3) % count]
+            let tangent = next - prev
+            let length = simd_length(tangent)
+            guard length > 0 else { continue }
+            var normal = SIMD2(-tangent.y, tangent.x) / length
+            let p = loop.points[i]
+            // Orient toward the piece: region loops walk their own edge and
+            // hole loops walk the sealed background, so probe for mask-true.
+            // The interior must be on exactly one side; an edge so noisy that
+            // both probes agree gives no trustworthy direction.
+            let inward = p + normal * 2.5
+            let outward = p - normal * 2.5
+            let inwardInMask = mask[Int(inward.x.rounded()), Int(inward.y.rounded())]
+            let outwardInMask = mask[Int(outward.x.rounded()), Int(outward.y.rounded())]
+            guard inwardInMask != outwardInMask else { continue }
+            if outwardInMask { normal = -normal }
+            normals[i] = normal
+            var s = 1.0
+            while s <= maxDistance {
+                let q = p + normal * s
+                if ink[Int(q.x.rounded()), Int(q.y.rounded())] {
+                    hits[i] = s
+                    break
+                }
+                s += 1
+            }
+        }
+        // A lone ray that tunnels past the outline to a different stroke (a
+        // junction, an interior line) would fold the loop into a spike. Each
+        // point instead travels the windowed median of its neighborhood's
+        // hits, which drops outliers and bridges single-point dropouts; a
+        // window that is mostly missing (a real pen gap) keeps the raw edge.
+        var result = loop.points
+        let window = 4
+        for i in 0..<count {
+            guard let normal = normals[i] else { continue }
+            var local: [Double] = []
+            for k in -window...window {
+                if let d = hits[(i + count + k) % count] { local.append(d) }
+            }
+            guard local.count > window else { continue }
+            local.sort()
+            result[i] = loop.points[i] + normal * local[local.count / 2]
+        }
+        // Where the mask edge runs between two nearly parallel strokes, the
+        // median still steps between them in runs; a light binomial low-pass
+        // dissolves that sawtooth without rounding real corners (contour
+        // points are ~1px apart, so the kernel only sees sub-stroke detail).
+        for _ in 0..<3 {
+            let previous = result
+            for i in 0..<count {
+                let before = previous[(i + count - 1) % count]
+                let after = previous[(i + 1) % count]
+                result[i] = (before + 2 * previous[i] + after) / 4
+            }
+        }
+        return Polyline(points: result, isClosed: loop.isClosed)
     }
 
     private static func closedContour(of component: InkComponent) -> Polyline {

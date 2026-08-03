@@ -33,6 +33,9 @@ final class TraceSession {
     private(set) var result: TraceResult?
     /// Subject mask in trace space; ink outside it is ignored while tracing.
     private var mask: BinaryBitmap?
+    /// The photo's binarized ink in trace space, kept while a mask exists so
+    /// outline recomputation can snap the cut to the drawn stroke.
+    private var snapInk: BinaryBitmap?
     /// The CUT boundaries: the segmentation mask's silhouette — one closed
     /// loop per mask region plus one per enclosed hole, all raster contours
     /// and therefore closed by construction. Empty when the project has no
@@ -111,20 +114,25 @@ final class TraceSession {
         let maskURL = store.maskURL(for: project)
         guard FileManager.default.fileExists(atPath: maskURL.path) else {
             mask = nil
+            snapInk = nil
             cutOutlines = []
             return
         }
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
         let fidelity = outlineDetail
-        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, [Polyline])? in
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, BinaryBitmap?, [Polyline])? in
             guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
             // The cut runs exactly on the subject's silhouette — the mask
             // boundary IS the figure's edge (the deer's outline). Raster
-            // contours, so every loop is closed no matter what.
-            return (bitmap, Self.outlines(of: bitmap, fidelity: fidelity))
+            // contours, so every loop is closed no matter what. Where the
+            // segmenter's edge strays off the pen line, snapping pulls the
+            // cut back onto the drawing's own stroke.
+            let ink = BinaryBitmap(cgImage: cgImage)
+            return (bitmap, ink, Self.outlines(of: bitmap, snappedTo: ink, fidelity: fidelity))
         }.value
         mask = loaded?.0
-        cutOutlines = loaded?.1 ?? []
+        snapInk = loaded?.1
+        cutOutlines = loaded?.2 ?? []
         TraceLog.log(
             "mask \(loaded == nil ? "FAILED to load" : "loaded"), \(cutOutlines.count) cut loop(s), \(cutOutlines.reduce(0) { $0 + $1.points.count }) points",
             file: diagnosticsURL
@@ -193,10 +201,18 @@ final class TraceSession {
     /// The mask boundary as closed loops (regions + holes), at a given
     /// fidelity. 1 hugs every raster bump the segmenter produced; 0
     /// simplifies and smooths hard.
-    nonisolated private static func outlines(of mask: BinaryBitmap, fidelity: Double) -> [Polyline] {
+    nonisolated private static func outlines(
+        of mask: BinaryBitmap, snappedTo ink: BinaryBitmap?, fidelity: Double
+    ) -> [Polyline] {
         let f = max(0, min(1, fidelity))
+        let diagonal = Double(mask.width * mask.width + mask.height * mask.height).squareRoot()
         return MaskGeometry.cutContours(
             of: mask,
+            snappedTo: ink,
+            // Big enough to bridge the segmenter's worst wander (measured
+            // ~50px at a 2500px diagonal), small enough not to reach interior
+            // features like an eye.
+            snapDistance: 0.02 * diagonal,
             simplifyTolerance: 8 - (8 - 0.75) * f,
             smoothingPasses: f < 0.5 ? 2 : 1
         )
@@ -209,11 +225,12 @@ final class TraceSession {
         outlineTask?.cancel()
         let fidelity = outlineDetail
         let result = result
+        let ink = snapInk
         outlineTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
             let computed = await Task.detached(priority: .userInitiated) { () -> ([Polyline], Set<TargetKey>) in
-                let outlines = Self.outlines(of: mask, fidelity: fidelity)
+                let outlines = Self.outlines(of: mask, snappedTo: ink, fidelity: fidelity)
                 var coincident: Set<TargetKey> = []
                 if let result {
                     coincident = Self.coincidentTargets(in: result, outlines: outlines)
