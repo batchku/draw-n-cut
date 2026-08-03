@@ -14,3 +14,4 @@ build/
 
 # Claude Code session state
 .claude/worktrees/
+build-ios/
