@@ -26,8 +26,10 @@ final class TraceSession {
         let polylineIndex: Int
     }
 
-    /// Offset of the sticker cut outline from the mask boundary, as a
-    /// fraction of the image diagonal (≈7.5 mm on an A4-width drawing).
+    /// Offset of the fallback cut outline from the traced ink, as a fraction
+    /// of the image diagonal (≈7.5 mm on an A4-width drawing). Only used when
+    /// no subject mask exists — with a mask, the cut runs exactly on the
+    /// figure's silhouette.
     nonisolated static let cutOutlineOffsetFraction = 0.03
 
     private let store: ProjectStore
@@ -46,6 +48,10 @@ final class TraceSession {
     private var subjectOutline: Polyline?
     private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
+    /// Traced polylines that just re-draw the cut outline (the figure's own
+    /// silhouette stroke). The laser already cuts there; engraving them too
+    /// would double-burn the piece's edge, so they are hidden from output.
+    private(set) var outlineTargets: Set<TargetKey> = []
     private(set) var isTracing = false
     private(set) var suggestionsApplied = false
 
@@ -112,9 +118,10 @@ final class TraceSession {
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
         let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, Polyline?)? in
             guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
-            let diagonal = Double(hypot(traceSpace.width, traceSpace.height))
-            let offset = max(1, Int(Self.cutOutlineOffsetFraction * diagonal))
-            return (bitmap, MaskGeometry.stickerOutline(around: bitmap, offsetPixels: offset))
+            // The cut runs exactly on the subject's silhouette — the mask
+            // boundary IS the figure's edge (the deer's outline). Offset 0
+            // still guarantees a closed loop: it is a raster contour.
+            return (bitmap, MaskGeometry.stickerOutline(around: bitmap, offsetPixels: 0))
         }.value
         mask = loaded?.0
         subjectOutline = loaded?.1
@@ -134,7 +141,7 @@ final class TraceSession {
         let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
-        let hasSubjectOutline = subjectOutline != nil
+        let subjectOutline = subjectOutline
         isTracing = true
         retraceTask = Task { [weak self] in
             if debounce {
@@ -143,7 +150,7 @@ final class TraceSession {
             guard !Task.isCancelled else { return }
             // Trace, classify, and detect all off the main actor — in a debug
             // build this is seconds of work on a full-page scan.
-            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason], Polyline?)? in
+            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason], Polyline?, Set<TargetKey>)? in
                 let traceSpace = BinaryBitmap.traceSize(for: image)
                 let eraseMask = EraseMask.bitmap(
                     from: shapes, width: Int(traceSpace.width), height: Int(traceSpace.height))
@@ -158,10 +165,12 @@ final class TraceSession {
                 // Without a subject mask the CUT outline follows whatever ink
                 // survived erasing — recomputed here so it stays closed and
                 // current after every change.
-                let fallback = hasSubjectOutline ? nil : Self.inkOutline(for: traced)
-                return (traced, Self.targets(for: suggestions, in: traced), fallback)
+                let fallback = subjectOutline == nil ? Self.inkOutline(for: traced) : nil
+                let outline = subjectOutline ?? fallback
+                let coincident = outline.map { Self.coincidentTargets(in: traced, outline: $0) } ?? []
+                return (traced, Self.targets(for: suggestions, in: traced), fallback, coincident)
             }.value
-            guard !Task.isCancelled, let self, let (traced, byTarget, fallback) = computed else { return }
+            guard !Task.isCancelled, let self, let (traced, byTarget, fallback, coincident) = computed else { return }
             self.result = traced
             self.suggestionsByTarget = byTarget
             self.isTracing = false
@@ -169,6 +178,7 @@ final class TraceSession {
             // per-polyline removals were only instant feedback and would
             // otherwise hide freshly traced neighbors.
             self.removedTargets = []
+            self.outlineTargets = coincident
             if self.subjectOutline == nil {
                 self.cutOutline = fallback
             }
@@ -203,6 +213,38 @@ final class TraceSession {
         let diagonal = Double(hypot(result.imageSize.width, result.imageSize.height))
         let offset = max(1, Int(cutOutlineOffsetFraction * diagonal))
         return MaskGeometry.stickerOutline(around: bitmap, offsetPixels: offset)
+    }
+
+    /// Polylines that run along the cut outline — the figure's silhouette
+    /// stroke re-traced as ink. Most of their length sits within a pen width
+    /// of the cut path, so cutting already renders them.
+    nonisolated private static func coincidentTargets(
+        in result: TraceResult, outline: Polyline
+    ) -> Set<TargetKey> {
+        var edge = outline.points
+        if outline.isClosed, let first = edge.first { edge.append(first) }
+        guard edge.count > 1 else { return [] }
+
+        func isNear(_ point: SIMD2<Double>, within distance: Double) -> Bool {
+            for i in 0..<(edge.count - 1)
+            where PathGeometry.distanceToSegment(point, edge[i], edge[i + 1]) <= distance {
+                return true
+            }
+            return false
+        }
+
+        var coincident: Set<TargetKey> = []
+        for (e, element) in result.elements.enumerated() {
+            let distance = max(6.0, 2.0 * element.estimatedStrokeWidth)
+            for (p, polyline) in element.polylines.enumerated() {
+                guard !polyline.points.isEmpty else { continue }
+                let near = polyline.points.count { isNear($0, within: distance) }
+                if 10 * near >= 8 * polyline.points.count {
+                    coincident.insert(TargetKey(elementIndex: e, polylineIndex: p))
+                }
+            }
+        }
+        return coincident
     }
 
     private var diagnosticsURL: URL {
@@ -426,7 +468,7 @@ final class TraceSession {
         for (e, element) in result.elements.enumerated() {
             for (p, polyline) in element.polylines.enumerated() {
                 let key = TargetKey(elementIndex: e, polylineIndex: p)
-                guard !removedTargets.contains(key) else { continue }
+                guard !removedTargets.contains(key), !outlineTargets.contains(key) else { continue }
                 output.append((key, polyline, suggestionsByTarget[key]))
             }
         }

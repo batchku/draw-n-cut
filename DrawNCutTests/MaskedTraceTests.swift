@@ -106,7 +106,18 @@ struct MaskedTraceTests {
         }
         let outline = try #require(session.cutOutline)
         #expect(outline.isClosed)
-        #expect(PathGeometry.polygon(outline.points, contains: center + SIMD2(radius, 0)))
+        // The cut runs ON the mask's silhouette (offset 0): a point just
+        // inside the rim is enclosed, and the outline's box matches the
+        // mask's box within simplify/smoothing slack.
+        #expect(PathGeometry.polygon(outline.points, contains: center + SIMD2(radius - 8, 0)))
+        let outlineBox = PathGeometry.boundingBox(of: outline.points)
+        let maskBounds = CGRect(
+            x: center.x - radius, y: center.y - radius,
+            width: 2 * radius, height: 2 * radius)
+        #expect(abs(outlineBox.minX - maskBounds.minX) < 8)
+        #expect(abs(outlineBox.maxX - maskBounds.maxX) < 8)
+        #expect(abs(outlineBox.minY - maskBounds.minY) < 8)
+        #expect(abs(outlineBox.maxY - maskBounds.maxY) < 8)
     }
 
     @Test func exportPutsOutlineOnCutLayerAndKeepsEngraveDefault() {
