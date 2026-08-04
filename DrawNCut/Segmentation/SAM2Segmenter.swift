@@ -4,7 +4,7 @@
 //
 //  On-device SAM 2.1 (Apple Core ML port, apple/coreml-sam2.1-small) wrapper.
 //
-//  Pipeline: image encoder (1024x1024) -> prompt encoder (1..16 point prompts)
+//  Pipeline: image encoder (1024x1024) -> prompt encoder (1..14 point prompts)
 //  -> mask decoder (3 candidate masks + IoU scores; best one is kept).
 //  The returned mask is upsampled to the original image resolution so the
 //  boundary can be offset into a sticker-style laser CUT outline.
@@ -63,7 +63,7 @@ public enum SAM2SegmenterError: Error, CustomStringConvertible {
         case .imageNotEncoded:
             return "mask(points:) called before encode(image:)."
         case .invalidPointCount(let n):
-            return "SAM2 prompt encoder accepts 1...16 points, got \(n)."
+            return "SAM2 accepts 1...\(SAM2Segmenter.maxPromptPoints) points, got \(n)."
         case .pointOutOfBounds(let p):
             return "Prompt point \(p) lies outside the encoded image bounds."
         case .unexpectedModelOutput(let detail):
@@ -79,8 +79,12 @@ public actor SAM2Segmenter {
     /// Side length of the square model input. SAM 2 uses plain scale-to-fill
     /// resizing (no letterboxing), matching Apple's conversion.
     public static let modelInputSide = 1024
-    /// Prompt encoder range constraint (verified on apple/coreml-sam2.1-small).
-    public static let maxPromptPoints = 16
+    /// The MASK DECODER is the binding constraint, not the prompt encoder:
+    /// its enumerated sparse-embedding shapes stop at 15 rows, and the
+    /// prompt encoder emits points + 1 padding token — so 14 points is the
+    /// most a decode can carry. 15 and 16 fail with "not in enumerated set
+    /// of allowed shapes" (verified by sweep on apple/coreml-sam2.1-small).
+    public static let maxPromptPoints = 14
 
     private let imageEncoder: MLModel
     private let promptEncoder: MLModel

@@ -131,15 +131,25 @@ final class RefineMaskSession {
     }
 
     private func refreshMask() {
-        guard let segmenter else { return }
+        guard let segmenter, let image else { return }
         let prompts = points.map { ($0.point, $0.isSubject) }
         guard !prompts.isEmpty else { return }
+        let imageWidth = image.width
+        let imageHeight = image.height
         promptGeneration += 1
         let generation = promptGeneration
         phase = .segmenting
         Task { [weak self] in
             do {
-                let mask = try await segmenter.mask(points: prompts)
+                let decoded = try await segmenter.mask(points: prompts)
+                let (mask, removedRegions) = await Task.detached(priority: .userInitiated) {
+                    Self.subtractingRemovedRegions(
+                        from: decoded, prompts: prompts,
+                        imageWidth: imageWidth, imageHeight: imageHeight)
+                }.value
+                if removedRegions > 0 {
+                    TraceLog.log("minus marker(s) subtracted \(removedRegions) mask region(s)")
+                }
                 // An all-empty mask selects nothing — treat it as no mask so
                 // "Use Outline" can't save a selection that traces to nothing.
                 // (Also the symptom of the known iOS-simulator Core ML defect
@@ -163,6 +173,55 @@ final class RefineMaskSession {
                 self.phase = .ready
             }
         }
+    }
+
+    /// SAM often keeps a disjoint region even when a remove marker sits
+    /// inside it, which reads as the minus doing nothing. Region subtraction
+    /// makes the intent deterministic: any mask region holding a remove
+    /// marker — and no add marker — is cut from the selection outright.
+    /// Removes inside the subject's own region still defer to the model.
+    nonisolated private static func subtractingRemovedRegions(
+        from mask: SegmentationMask,
+        prompts: [(SIMD2<Double>, Bool)],
+        imageWidth: Int, imageHeight: Int
+    ) -> (SegmentationMask, Int) {
+        guard prompts.contains(where: { !$0.1 }) else { return (mask, 0) }
+        var bitmap = MaskGeometry.bitmap(from: mask)
+        let components = bitmap.inkComponents(minArea: 1)
+        guard components.count > 1 else { return (mask, 0) }
+        let locals = components.map { $0.localBitmap() }
+
+        func componentIndex(containing point: SIMD2<Double>) -> Int? {
+            let x = Int((point.x * Double(mask.width) / Double(imageWidth)).rounded())
+            let y = Int((point.y * Double(mask.height) / Double(imageHeight)).rounded())
+            for (index, component) in components.enumerated()
+            where locals[index][x - component.origin.x, y - component.origin.y] {
+                return index
+            }
+            return nil
+        }
+
+        var keptByAdd: Set<Int> = []
+        var markedByRemove: Set<Int> = []
+        for (point, isSubject) in prompts {
+            guard let index = componentIndex(containing: point) else { continue }
+            if isSubject { keptByAdd.insert(index) } else { markedByRemove.insert(index) }
+        }
+        let doomed = markedByRemove.subtracting(keptByAdd)
+        guard !doomed.isEmpty, doomed.count < components.count else { return (mask, 0) }
+        for index in doomed {
+            let component = components[index]
+            let local = locals[index]
+            for y in 0..<component.size.height {
+                for x in 0..<component.size.width where local[x, y] {
+                    bitmap.pixels[(y + component.origin.y) * bitmap.width + (x + component.origin.x)] = false
+                }
+            }
+        }
+        return (
+            SegmentationMask(width: mask.width, height: mask.height, pixels: bitmap.pixels),
+            doomed.count
+        )
     }
 
     // MARK: - Output

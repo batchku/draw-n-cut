@@ -42,7 +42,9 @@ let mask: SegmentationMask = try await segmenter.mask(points: [
 - `SAM2Segmenter` is an actor; embeddings are cached until `reset()` or the
   next `encode`. After one encode, each new tap is a ~15–60 ms decode, so
   interactive refinement is cheap.
-- 1 to 16 points per prompt (model range constraint, verified). Labels:
+- 1 to 14 points per prompt: the mask decoder's enumerated sparse-embedding
+  shapes stop at 15 rows (points + 1 padding token), so 15-16 points fail with
+  "not in enumerated set of allowed shapes" (verified by sweep). Labels:
   `true` = foreground, `false` = background.
 - Box prompts ARE supported by the models (SAM convention: two extra points
   labeled 2 = top-left, 3 = bottom-right). The current API only exposes point

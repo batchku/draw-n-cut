@@ -67,6 +67,9 @@ struct RefineMaskView: View {
             if session.maskLooksLikeMiss || (session.mask == nil && session.phase == .ready) {
                 return "Tap directly on the drawn lines."
             }
+            if session.points.count >= SAM2Segmenter.maxPromptPoints {
+                return "Marker limit reached — tap a marker to delete one first."
+            }
             if session.removeMode {
                 return "Tap an area to remove it from the selection."
             }
