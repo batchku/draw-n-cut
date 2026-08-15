@@ -70,7 +70,7 @@ One-time setup:
 2. Save the downloaded `.p8` as
    `~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8`.
 3. Create the app record once: App Store Connect → My Apps → **+** → New App
-   (platform iOS, bundle ID `com.irllabs.drawncut`).
+   (platform iOS, bundle ID `ai.kidwiz.drawncut`).
 
 Then every deploy is one command:
 

@@ -7,7 +7,7 @@
 #   2. Save the downloaded .p8 as
 #      ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8
 #   3. Create the app record once in App Store Connect (My Apps → + → New App,
-#      bundle ID com.irllabs.drawncut). The API cannot create app records.
+#      bundle ID ai.kidwiz.drawncut). The API cannot create app records.
 #
 # Usage:
 #   ASC_KEY_ID=XXXXXXXXXX ASC_ISSUER_ID=xxxxxxxx-....  scripts/deploy-testflight.sh

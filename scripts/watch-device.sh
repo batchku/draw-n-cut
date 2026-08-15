@@ -7,4 +7,4 @@
 set -euo pipefail
 DEVICE="${1:-B062F44F-9E75-5CC0-8707-0CF2E4BFA5CF}"
 exec xcrun devicectl device process launch --console --terminate-existing \
-    --device "$DEVICE" com.irllabs.drawncut
+    --device "$DEVICE" ai.kidwiz.drawncut

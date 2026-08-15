@@ -9,7 +9,7 @@ import os
 /// - stdout → visible live via `devicectl device process launch --console`
 /// - per-project `diagnostics.log` → pulled with the Documents folder
 enum TraceLog {
-    private static let logger = Logger(subsystem: "com.irllabs.drawncut", category: "pipeline")
+    private static let logger = Logger(subsystem: "ai.kidwiz.drawncut", category: "pipeline")
 
     static func log(_ message: String, file fileURL: URL? = nil) {
         logger.info("\(message, privacy: .public)")

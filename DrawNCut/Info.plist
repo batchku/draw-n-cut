@@ -44,7 +44,7 @@
 			<key>UTTypeDescription</key>
 			<string>DXF Drawing</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.irllabs.drawncut.dxf</string>
+			<string>ai.kidwiz.drawncut.dxf</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
