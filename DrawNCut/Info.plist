@@ -17,9 +17,11 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
 	<string>Draw'n'Cut uses the camera to photograph drawings so they can be traced and laser cut.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
@@ -42,7 +44,7 @@
 			<key>UTTypeDescription</key>
 			<string>DXF Drawing</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.alimomeni.drawncut.dxf</string>
+			<string>studio.irl.drawncut.dxf</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
