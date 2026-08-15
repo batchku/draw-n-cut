@@ -15,6 +15,9 @@ struct TraceSnapshot: Codable {
     var eraseTaps: [[Double]] = []
     var eraseShapes: [EraseShape]? = nil
     var outlineDetail: Double? = nil
+    var smoothness: Double? = nil
+    /// Cut-promotion taps as [x, y], in tap order.
+    var cutTaps: [[Double]]? = nil
 }
 
 /// Drives the trace screen: owns the image, re-traces when Detail changes,
@@ -48,11 +51,23 @@ final class TraceSession {
     /// silhouette stroke). The laser already cuts there; engraving them too
     /// would double-burn the piece's edge, so they are hidden from output.
     private(set) var outlineTargets: Set<TargetKey> = []
+    /// Engrave lines the user tapped to promote into cut lines. Derived from
+    /// `cutTaps` after every re-trace.
+    private(set) var cutTargets: Set<TargetKey> = []
+    /// Every cut-toggle tap, in image space, in order. Replay order matters:
+    /// tapping a line twice nets back to engrave.
+    private(set) var cutTaps: [SIMD2<Double>] = []
     private(set) var isTracing = false
     private(set) var suggestionsApplied = false
 
     var detail: Double = 0.7 {
         didSet { if oldValue != detail { scheduleRetrace(debounce: true) } }
+    }
+    /// How the engrave lines are drawn: 0 follows the raster faithfully
+    /// (jagged), 1 simplifies and rounds hard. Separate from Detail, which
+    /// decides what survives.
+    var smoothness: Double = TraceParameters.defaultSmoothness {
+        didSet { if oldValue != smoothness { scheduleRetrace(debounce: true) } }
     }
     /// Fidelity of the cut outline to the mask boundary: 1 follows every
     /// bump the segmenter saw, 0 is a heavily smoothed silhouette.
@@ -154,6 +169,7 @@ final class TraceSession {
         guard let image else { return }
         retraceTask?.cancel()
         let detail = detail
+        let smoothness = smoothness
         let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
@@ -171,7 +187,8 @@ final class TraceSession {
                 let eraseMask = EraseMask.bitmap(
                     from: shapes, width: Int(traceSpace.width), height: Int(traceSpace.height))
                 guard let traced = TraceEngine.trace(
-                    image: image, mask: mask, eraseMask: eraseMask, detail: detail) else { return nil }
+                    image: image, mask: mask, eraseMask: eraseMask,
+                    detail: detail, smoothness: smoothness) else { return nil }
                 let classification = ElementClassifier.classify(traced)
                 let suggestions = NonSubjectDetector.suggestions(
                     for: classification,
@@ -190,6 +207,7 @@ final class TraceSession {
             // otherwise hide freshly traced neighbors.
             self.removedTargets = []
             self.outlineTargets = coincident
+            self.reapplyCutTaps()
             self.logTraceOutcome(traced, suggestionCount: byTarget.count)
             // Text regions may have landed while this trace was running.
             if self.textRegions != regions {
@@ -240,6 +258,7 @@ final class TraceSession {
             guard !Task.isCancelled, let self else { return }
             self.cutOutlines = computed.0
             self.outlineTargets = computed.1
+            self.reapplyCutTaps()
         }
     }
 
@@ -287,11 +306,11 @@ final class TraceSession {
     private func logTraceOutcome(_ traced: TraceResult, suggestionCount: Int) {
         var binarization = "binarization=?"
         if let report = traced.binarization {
-            binarization = "ink=\(report.inkPixelCount) mask=\(report.paperMaskActive ? "on(\(Int(report.paperCoverage * 100))%)" : "off") sep=\(Int(report.otsuClassSeparation)) border=\(Int(report.paperSurroundContrast))"
+            binarization = "ink=\(report.inkPixelCount) mask=\(report.paperMaskActive ? "on(\(Int(report.paperCoverage * 100))%)" : "off") sep=\(Int(report.otsuClassSeparation)) border=\(Int(report.paperSurroundContrast)) edge=\(Int(report.paperEdgeSharpness))"
         }
         let polylineCount = traced.elements.reduce(0) { $0 + $1.polylines.count }
         TraceLog.log(
-            "traced detail=\(String(format: "%.2f", detail)) → \(traced.elements.count) elements, \(polylineCount) polylines, \(suggestionCount) suggestions | \(binarization)",
+            "traced detail=\(String(format: "%.2f", detail)) smooth=\(String(format: "%.2f", smoothness)) → \(traced.elements.count) elements, \(polylineCount) polylines, \(suggestionCount) suggestions | \(binarization)",
             file: diagnosticsURL
         )
         let visiblePolylines = visible.map(\.polyline)
@@ -320,22 +339,57 @@ final class TraceSession {
         return byTarget
     }
 
+    // MARK: - Cut promotion
+
+    /// Toggles the tapped engrave line between engrave (blue) and cut (red).
+    /// Taps are recorded in image space and replayed after every re-trace,
+    /// so promotions survive Detail/Smoothness changes — the same pattern
+    /// erasures use.
+    func toggleCut(at point: SIMD2<Double>) {
+        guard let key = target(near: point) else { return }
+        cutTaps.append(point)
+        if cutTargets.contains(key) {
+            cutTargets.remove(key)
+        } else {
+            cutTargets.insert(key)
+        }
+    }
+
+    /// Replays every recorded cut tap against the current trace result. A
+    /// tap whose line no longer exists (erased, or dropped at a coarser
+    /// Detail) hits nothing and is skipped for that trace; it applies again
+    /// when the line comes back.
+    private func reapplyCutTaps() {
+        var toggled: Set<TargetKey> = []
+        for tap in cutTaps {
+            guard let key = target(near: tap) else { continue }
+            if toggled.contains(key) {
+                toggled.remove(key)
+            } else {
+                toggled.insert(key)
+            }
+        }
+        cutTargets = toggled
+    }
+
     // MARK: - Erasing
 
-    /// The polyline nearest a tap, within a forgiving thumb radius.
+    /// The visible polyline nearest a tap, within a forgiving thumb radius.
     func target(near point: SIMD2<Double>) -> TargetKey? {
         guard let result else { return nil }
         let threshold = 0.025 * hypot(result.imageSize.width, result.imageSize.height)
         var best: (TargetKey, Double)?
         for (e, element) in result.elements.enumerated() {
             for (p, polyline) in element.polylines.enumerated() {
+                let key = TargetKey(elementIndex: e, polylineIndex: p)
+                guard !removedTargets.contains(key), !outlineTargets.contains(key) else { continue }
                 var points = polyline.points
                 if polyline.isClosed, let first = points.first { points.append(first) }
                 guard points.count > 1 else { continue }
                 for i in 0..<(points.count - 1) {
                     let d = PathGeometry.distanceToSegment(point, points[i], points[i + 1])
                     if d < (best?.1 ?? threshold) {
-                        best = (TargetKey(elementIndex: e, polylineIndex: p), d)
+                        best = (key, d)
                     }
                 }
             }
@@ -457,7 +511,8 @@ final class TraceSession {
 
     func saveVersion() throws {
         let snapshot = TraceSnapshot(
-            detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail)
+            detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail,
+            smoothness: smoothness, cutTaps: cutTaps.map { [$0.x, $0.y] })
         let data = try JSONEncoder().encode(snapshot)
         _ = try store.addTraceVersion(to: project, detail: detail, pathsData: data)
         syncProject()
@@ -482,6 +537,13 @@ final class TraceSession {
         syncProject()
         if let restored = snapshot.outlineDetail {
             outlineDetail = restored   // triggers outline refresh when changed
+        }
+        // Older snapshots predate the Smoothness slider; they were made with
+        // what is now its default. Setting these may each schedule a retrace,
+        // but scheduling cancels the previous task, so only one trace runs.
+        smoothness = snapshot.smoothness ?? TraceParameters.defaultSmoothness
+        cutTaps = (snapshot.cutTaps ?? []).compactMap { values in
+            values.count >= 2 ? SIMD2(values[0], values[1]) : nil
         }
         if detail == snapshot.detail {
             scheduleRetrace(debounce: false)
@@ -519,11 +581,13 @@ final class TraceSession {
     // MARK: - Export
 
     /// Writes the current visible trace as a DXF sized to `widthMM`, returns
-    /// the file URL. The sticker outline (when present) lands on the CUT
-    /// layer; everything traced engraves. Per-path overrides are a later task.
+    /// the file URL. The cut outline and any tap-promoted lines land on the
+    /// CUT layer; everything else traced engraves.
     func exportDXF(widthMM: Double) throws -> URL {
-        let polylines = visible.map(\.polyline)
-        let dxf = DXFExportBuilder.dxf(from: polylines, cutOutlines: cutOutlines, widthMM: widthMM)
+        let engrave = visible.filter { !cutTargets.contains($0.key) }.map(\.polyline)
+        let promoted = visible.filter { cutTargets.contains($0.key) }.map(\.polyline)
+        let dxf = DXFExportBuilder.dxf(
+            from: engrave, cutOutlines: cutOutlines + promoted, widthMM: widthMM)
         let directory = store.exportsDirectory(for: project)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let existing = (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.count ?? 0

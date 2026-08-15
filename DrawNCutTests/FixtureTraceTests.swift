@@ -8,8 +8,12 @@ import Testing
 /// Also writes SVG renderings of the traces to /tmp/drawncut-traces for
 /// visual inspection.
 struct FixtureTraceTests {
+    static func fixtureURL(_ name: String, extension ext: String = "png") throws -> URL {
+        try #require(Bundle(for: BundleToken.self).url(forResource: name, withExtension: ext))
+    }
+
     static func fixtureImage(_ name: String, extension ext: String = "png") throws -> CGImage {
-        let url = try #require(Bundle(for: BundleToken.self).url(forResource: name, withExtension: ext))
+        let url = try fixtureURL(name, extension: ext)
         let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
         return try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
     }

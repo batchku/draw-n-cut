@@ -100,6 +100,18 @@ struct TraceEngineTests {
         #expect(coarse.speckleMinArea > mid.speckleMinArea)
         #expect(mid.speckleMinArea > fine.speckleMinArea)
         #expect(coarse.minPolylineLength > fine.minPolylineLength)
-        #expect(coarse.simplifyTolerance > fine.simplifyTolerance)
+        // Detail no longer touches how curves are drawn — that's Smoothness.
+        #expect(coarse.simplifyTolerance == fine.simplifyTolerance)
+    }
+
+    @Test func smoothnessSliderMapsMonotonically() {
+        let jagged = TraceParameters.from(detail: 0.7, smoothness: 0, imageDiagonal: 1000)
+        let smooth = TraceParameters.from(detail: 0.7, smoothness: 1, imageDiagonal: 1000)
+        #expect(jagged.simplifyTolerance < smooth.simplifyTolerance)
+        #expect(jagged.smoothingPasses == 0, "full jaggedness must keep raw corners")
+        #expect(smooth.smoothingPasses > jagged.smoothingPasses)
+        // Smoothness must not change which marks survive.
+        #expect(jagged.speckleMinArea == smooth.speckleMinArea)
+        #expect(jagged.minPolylineLength == smooth.minPolylineLength)
     }
 }

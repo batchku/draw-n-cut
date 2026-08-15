@@ -165,6 +165,7 @@ struct PhotoTraceTests {
                 "coverage \(report.paperCoverage)")
         #expect(report.otsuClassSeparation > 100, "separation \(report.otsuClassSeparation)")
         #expect(report.paperSurroundContrast > 100, "surround \(report.paperSurroundContrast)")
+        #expect(report.paperEdgeSharpness > 60, "edge \(report.paperEdgeSharpness)")
         #expect(report.inkPixelCount > 0)
     }
 
@@ -205,6 +206,36 @@ struct PhotoTraceTests {
         }
     }
 
+    /// The dot fallback must follow the blob's own boundary. (Regression: it
+    /// used to synthesize an equal-area circle — 8 points, so every filled
+    /// eye rendered as a perfect octagon — which also poked outside any
+    /// non-circular blob.)
+    @Test func solidSquareLoopFollowsItsShapeNotACircle() throws {
+        let image = TestCanvas.image(size: 600) { ctx in
+            ctx.setLineWidth(5)
+            ctx.move(to: CGPoint(x: 40, y: 560))
+            ctx.addLine(to: CGPoint(x: 560, y: 560))
+            ctx.strokePath()
+            // Solid square: skeletonizes to nothing, takes the loop fallback.
+            // An equal-area circle (r ≈ 12.4) would cross its edges (±11).
+            ctx.fill(CGRect(x: 289, y: 289, width: 22, height: 22))
+        }
+        let result = try #require(TraceEngine.trace(image: image, detail: 0.8))
+        let loops = result.elements.flatMap(\.polylines).filter(\.isClosed)
+        try #require(!loops.isEmpty, "the filled square must engrave as a loop")
+        // CG y-up → bitmap y-down: the square lands at y 289...311.
+        let square = CGRect(x: 289, y: 289, width: 22, height: 22).insetBy(dx: -2.5, dy: -2.5)
+        for loop in loops {
+            var bbox = CGRect.null
+            for point in loop.points {
+                #expect(square.contains(CGPoint(x: point.x, y: point.y)),
+                        "loop point \(point) escaped the square \(square)")
+                bbox = bbox.union(CGRect(x: point.x, y: point.y, width: 0, height: 0))
+            }
+            #expect(bbox.width >= 16 && bbox.height >= 16, "loop collapsed to \(bbox)")
+        }
+    }
+
     @Test func sparseScratchNeverSynthesizesAPhantomLoop() throws {
         let image = TestCanvas.image(size: 600) { ctx in
             ctx.setLineWidth(5)
@@ -225,6 +256,56 @@ struct PhotoTraceTests {
         let result = try #require(TraceEngine.trace(image: image, detail: 0.0))
         #expect(result.elements.count == 1, "got \(result.elements.count) elements")
         #expect(result.elements.allSatisfy { $0.polylines.allSatisfy { !$0.isClosed } })
+    }
+
+    /// A real handheld photo where the page fills the frame but a hard
+    /// diagonal shadow crosses it. Otsu splits lit paper from shadowed paper
+    /// (separation 57) and the shadow darkens enough of the border to pass
+    /// the surround gate (61) — only the edge-sharpness gate tells this
+    /// shadow (5px step ≈ 3 gray levels) from a real table edge (≈ 108).
+    /// (Regression: the paper mask kept only the lit band and deleted the
+    /// fish drawing in the shadow — the user saw "Nothing to Trace".)
+    @Test(.timeLimit(.minutes(1)))
+    func shadowedFullFramePageKeepsItsDrawing() throws {
+        let image = try FixtureTraceTests.fixtureImage("fish-circle-shadow-photo", extension: "jpg")
+        let result = try #require(TraceEngine.trace(image: image, detail: 0.7))
+
+        let report = try #require(result.binarization)
+        #expect(!report.paperMaskActive,
+                "paper mask fired on a shadow (edge sharpness \(report.paperEdgeSharpness))")
+
+        #expect(result.elements.count >= 15, "got \(result.elements.count) elements")
+        // The fish in its circle sits center-low in the frame; the union of
+        // the traced elements must cover it.
+        var union = CGRect.null
+        for element in result.elements { union = union.union(element.boundingBox) }
+        let drawingArea = CGRect(
+            x: 0.25 * result.imageSize.width, y: 0.45 * result.imageSize.height,
+            width: 0.45 * result.imageSize.width, height: 0.35 * result.imageSize.height
+        )
+        #expect(union.contains(drawingArea), "union \(union) misses the drawing at \(drawingArea)")
+
+        try SVGDump.write(result: result, name: "fish-circle-shadow-detail-0.7")
+    }
+
+    /// The same shadowed photo through the on-device path: trace confined to
+    /// the SAM subject mask the user refined (the fish body). The strokes
+    /// inside the mask must survive as engraving lines.
+    @Test(.timeLimit(.minutes(1)))
+    func shadowedPageStillTracesInsideSubjectMask() throws {
+        let image = try FixtureTraceTests.fixtureImage("fish-circle-shadow-photo", extension: "jpg")
+        let maskURL = try FixtureTraceTests.fixtureURL("fish-circle-shadow-mask", extension: "png")
+        let traceSpace = BinaryBitmap.traceSize(for: image)
+        let mask = try #require(MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace))
+
+        let result = try #require(TraceEngine.trace(image: image, mask: mask, eraseMask: nil, detail: 0.7))
+        let polylines = result.elements.flatMap(\.polylines)
+        #expect(!result.elements.isEmpty, "nothing traced inside the subject mask")
+        #expect(polylines.count >= 10, "got \(polylines.count) polylines")
+        // Everything traced lies within the fish; its strokes are long
+        // (eyes, mouth, fins, gill lines), not residual specks.
+        let totalLength = polylines.reduce(0.0) { $0 + $1.length }
+        #expect(totalLength >= 1500, "got total length \(Int(totalLength))")
     }
 
     @Test func frameSpanningComponentIsDropped() throws {

@@ -2,9 +2,10 @@ import CoreGraphics
 import Foundation
 import simd
 
-/// Everything the Detail slider controls, derived from one 0...1 value.
-/// All lengths are relative to the image diagonal so behavior is
-/// resolution-independent.
+/// Everything the trace sliders control, derived from two 0...1 values:
+/// Detail decides *which* marks survive, Smoothness decides *how* the
+/// surviving curves are drawn. All lengths are relative to the image
+/// diagonal so behavior is resolution-independent.
 struct TraceParameters: Equatable {
     /// Ink blobs smaller than this are dropped as noise (px²).
     var speckleMinArea: Int
@@ -15,12 +16,22 @@ struct TraceParameters: Equatable {
     /// Chaikin smoothing passes.
     var smoothingPasses: Int
 
+    /// The Smoothness default: tolerance 1.5px and one Chaikin pass at a
+    /// 1000px diagonal — the values the single Detail slider produced at its
+    /// own default before the axes were split.
+    static let defaultSmoothness = 0.4
+
     /// - Parameters:
     ///   - detail: 1 keeps everything the pen did; 0 keeps only the boldest
-    ///     marks, aggressively simplified.
+    ///     marks.
+    ///   - smoothness: 0 follows the raster faithfully — jagged, every
+    ///     corner kept; 1 simplifies hard and rounds every corner.
     ///   - imageDiagonal: diagonal of the traced image in pixels.
-    static func from(detail: Double, imageDiagonal: Double) -> TraceParameters {
+    static func from(
+        detail: Double, smoothness: Double = defaultSmoothness, imageDiagonal: Double
+    ) -> TraceParameters {
         let d = max(0, min(1, detail))
+        let s = max(0, min(1, smoothness))
         func lerp(_ coarse: Double, _ fine: Double) -> Double {
             coarse + (fine - coarse) * d
         }
@@ -29,8 +40,8 @@ struct TraceParameters: Equatable {
         return TraceParameters(
             speckleMinArea: max(2, Int(speckleSide * speckleSide)),
             minPolylineLength: lerp(30, 3) * unit,
-            simplifyTolerance: lerp(3.0, 0.6) * unit,
-            smoothingPasses: d < 0.5 ? 2 : 1
+            simplifyTolerance: (0.5 + 2.5 * s) * unit,
+            smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : 2
         )
     }
 }
@@ -72,7 +83,8 @@ enum TraceEngine {
     ///     is dropped before analysis, so erased marks cannot re-trace.
     ///   - detail: the single user-facing slider, 0...1.
     static func trace(
-        image: CGImage, mask: BinaryBitmap? = nil, eraseMask: BinaryBitmap? = nil, detail: Double
+        image: CGImage, mask: BinaryBitmap? = nil, eraseMask: BinaryBitmap? = nil,
+        detail: Double, smoothness: Double = TraceParameters.defaultSmoothness
     ) -> TraceResult? {
         var report: BinarizationReport?
         guard var bitmap = BinaryBitmap(cgImage: image, report: &report) else { return nil }
@@ -85,7 +97,8 @@ enum TraceEngine {
         let w = Double(bitmap.width)
         let h = Double(bitmap.height)
         let diagonal = (w * w + h * h).squareRoot()
-        let parameters = TraceParameters.from(detail: detail, imageDiagonal: diagonal)
+        let parameters = TraceParameters.from(
+            detail: detail, smoothness: smoothness, imageDiagonal: diagonal)
         let elements = trace(bitmap: bitmap, parameters: parameters)
         return TraceResult(
             elements: elements,
@@ -151,14 +164,20 @@ enum TraceEngine {
             let isDot = maxSide <= max(0.02 * imageDiagonal, 12)
             let isSolidFill = density > 0.5 && maxSide <= 0.25 * imageDiagonal
             guard isDot || isSolidFill else { return nil }
-            let bbox = component.boundingBox
-            let center = SIMD2(Double(bbox.midX), Double(bbox.midY))
-            let radius = max(1.0, (Double(component.area) / Double.pi).squareRoot())
-            let dot = (0..<8).map { i -> SIMD2<Double> in
-                let angle = Double(i) / 8 * 2 * Double.pi
-                return center + radius * SIMD2(cos(angle), sin(angle))
+            // The loop is the blob's own boundary: a squashed-quadrilateral
+            // eye must engrave as one, not as a synthesized circle of equal
+            // area (which read as a perfect octagon on screen). The blob is
+            // only a few pixels across, so simplification is capped relative
+            // to its size or the shape collapses.
+            guard let contour = MaskGeometry.outerContour(of: component.localBitmap()) else {
+                return nil
             }
-            processed = [Polyline(points: dot, isClosed: true)]
+            let tolerance = min(parameters.simplifyTolerance, max(0.75, 0.06 * maxSide))
+            let shaped = PathGeometry.smoothed(
+                PathGeometry.simplified(contour, tolerance: tolerance),
+                passes: parameters.smoothingPasses
+            )
+            processed = [Polyline(points: shaped.points.map { $0 + offset }, isClosed: true)]
         }
 
         let totalLength = processed.reduce(0) { $0 + $1.length }

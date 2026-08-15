@@ -140,4 +140,56 @@ struct MaskedTraceTests {
         let dxf = DXFExportBuilder.dxf(from: [engrave], cutOutlines: [outline], widthMM: 100)
         #expect(dxf.contains("CUT") && dxf.contains("ENGRAVE"))
     }
+
+    /// The tap-to-cut toggle: tapping a traced line promotes it to a cut
+    /// line, tapping again demotes it, the promotion survives a re-trace
+    /// (taps replay in image space, like erasures), and a promoted line
+    /// exports on the CUT layer.
+    @MainActor
+    @Test(.timeLimit(.minutes(2)))
+    func tapTogglesEngraveLineToCutAndSurvivesRetrace() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "MaskedTraceTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = ProjectStore(rootURL: root)
+        let project = try store.create(title: "Fish")
+        let fixtureURL = try #require(Bundle(for: MaskedTraceBundleToken.self)
+            .url(forResource: "fish-photo", withExtension: "jpg"))
+        try FileManager.default.copyItem(at: fixtureURL, to: store.originalImageURL(for: project))
+
+        let session = TraceSession(project: project, store: store)
+        await session.load()
+        for _ in 0..<600 where session.result == nil || session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let item = try #require(session.visible.first(where: { $0.polyline.points.count > 1 }))
+        let mid = item.polyline.points[item.polyline.points.count / 2]
+
+        session.toggleCut(at: mid)
+        #expect(session.cutTargets.count == 1)
+        session.toggleCut(at: mid)
+        #expect(session.cutTargets.isEmpty, "second tap must demote back to engrave")
+        session.toggleCut(at: mid)
+        #expect(session.cutTargets.count == 1)
+
+        // The promotion must survive a re-trace at different smoothing.
+        session.smoothness = 0.9
+        for _ in 0..<600 where session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(session.cutTargets.count == 1, "promotion lost across re-trace")
+
+        let promotedVisible = session.visible.count { session.cutTargets.contains($0.key) }
+        #expect(promotedVisible == 1,
+                "cutTargets \(session.cutTargets) don't match visible keys (visible: \(session.visible.count), tracing: \(session.isTracing))")
+
+        // No mask → no cut outline, so any CUT-layer entity is the promoted
+        // line ("8" is DXF's layer group code on each entity; the writer
+        // emits CRLF line endings).
+        let url = try session.exportDXF(widthMM: 100)
+        let dxf = try String(contentsOf: url, encoding: .utf8)
+        #expect(dxf.contains("8\r\nCUT"), "promoted line missing from the CUT layer")
+    }
 }

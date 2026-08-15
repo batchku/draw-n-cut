@@ -12,6 +12,9 @@ struct BinarizationReport: Sendable {
     var paperCoverage: Double
     var otsuClassSeparation: Double
     var paperSurroundContrast: Double
+    /// Median gray step across the candidate paper region's edge, 0 until
+    /// the edge is actually measured (earlier gates can reject first).
+    var paperEdgeSharpness: Double = 0
 }
 
 /// A 1-bit ink bitmap: `true` means ink. The raster substrate for tracing —
@@ -343,6 +346,19 @@ struct BinaryBitmap {
         // No dominant paper either: don't guess, let the trace guards cope.
         if paperCount * 5 < total { return nil }
 
+        // A real paper edge is a step — paper one side, table the other,
+        // most of the brightness change inside a few pixels. A hard shadow
+        // crossing a full-frame page passes both gates above (measured on the
+        // shadowed fish-in-circle photo: separation 57, surround 61) because
+        // Otsu splits lit paper from shadowed paper, but its penumbra is
+        // gradual: the 5px step across the region edge medians ~3 gray
+        // levels there vs 108 on the paper-on-table composites. Under 40 the
+        // "edge" is a lighting transition on one surface — masking would
+        // erase every mark in the shadow, so don't.
+        let sharpness = Self.edgeSharpness(gray: gray, outside: outside, width: w, height: h)
+        report.paperEdgeSharpness = sharpness
+        if sharpness < 40 { return nil }
+
         // Erode by Chebyshev distance-to-outside (two-pass chamfer, O(pixels)).
         // The world beyond the frame counts as outside too: where the paper
         // is cropped by the frame, the frame edge *is* the paper edge and
@@ -394,6 +410,34 @@ struct BinaryBitmap {
         report.paperMaskActive = true
         report.paperCoverage = Double(covered) / Double(total)
         return mask
+    }
+
+    /// Median brightness step across the pre-erosion paper edge: for each
+    /// region pixel 4-adjacent to `outside`, gray 5px inward minus gray 5px
+    /// outward along that adjacency. Boundary pixels whose samples would
+    /// leave the frame are skipped; no measurable boundary reads as 0
+    /// (maximally soft), which fails the caller's gate — the safe direction.
+    private static func edgeSharpness(
+        gray: [UInt8], outside: [Bool], width w: Int, height h: Int
+    ) -> Double {
+        let r = 5
+        var steps: [Int] = []
+        guard w > 2 * r, h > 2 * r else { return 0 }
+        for y in r..<(h - r) {
+            for x in r..<(w - r) {
+                let index = y * w + x
+                guard !outside[index] else { continue }
+                for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)]
+                where outside[(y + dy) * w + (x + dx)] {
+                    let inward = Int(gray[(y - dy * r) * w + (x - dx * r)])
+                    let outward = Int(gray[(y + dy * r) * w + (x + dx * r)])
+                    steps.append(inward - outward)
+                }
+            }
+        }
+        guard !steps.isEmpty else { return 0 }
+        steps.sort()
+        return Double(steps[steps.count / 2])
     }
 
     /// The adaptive window saturates inside solid fills larger than itself

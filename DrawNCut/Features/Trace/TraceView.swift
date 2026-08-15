@@ -99,7 +99,7 @@ struct TraceView: View {
                         .tint(.red)
                 }
             }
-            // The blue engrave lines: the trace Detail.
+            // The blue engrave lines: Detail decides which marks survive…
             HStack {
                 Text("Lines")
                     .font(.caption)
@@ -107,6 +107,16 @@ struct TraceView: View {
                     .frame(width: 52, alignment: .leading)
                 Slider(value: $session.detail, in: 0...1)
                     .tint(.blue)
+            }
+            // …and Smooth decides how they are drawn: left keeps every
+            // corner the raster had (jagged), right rounds everything.
+            HStack {
+                Text("Smooth")
+                    .font(.caption)
+                    .foregroundStyle(.blue)
+                    .frame(width: 52, alignment: .leading)
+                Slider(value: $session.smoothness, in: 0...1)
+                    .tint(.blue.opacity(0.55))
             }
             HStack(spacing: 16) {
                 Spacer()
@@ -250,7 +260,11 @@ private struct TraceCanvas: View {
                     context.opacity = 1
                 }
                 for item in session.visible {
-                    let style = color(for: item.suggestion)
+                    // Tap-promoted cut lines draw exactly like the cut
+                    // outline; promotion outranks any pending suggestion.
+                    let style = session.cutTargets.contains(item.key)
+                        ? (color: Color.red, emphasized: true)
+                        : color(for: item.suggestion)
                     context.stroke(
                         path(for: item.polyline, scale: scale, offset: offset),
                         with: .color(style.color),
@@ -318,6 +332,12 @@ private struct TraceCanvas: View {
                     clampPan(viewport: geometry.size)
                 } onTwoFingerTap: {
                     session.undoErase()
+                } onSingleTap: { location in
+                    // Tap a blue line → cut (red); tap again → engrave (blue).
+                    session.toggleCut(at: SIMD2(
+                        (location.x - offset.width) / scale,
+                        (location.y - offset.height) / scale
+                    ))
                 }
             }
         }
