@@ -55,14 +55,15 @@ cat > build-archive/ExportOptions.plist <<PLIST
     <key>manageAppVersionAndBuildNumber</key><false/>
 </dict></plist>
 PLIST
+# No API-key flags here: minting the cloud-managed DISTRIBUTION certificate
+# needs more privilege than an App Manager API key ("Cloud signing permission
+# error"), so signing + upload ride the Xcode account session instead —
+# Xcode → Settings → Accounts must be signed into the team.
 xcodebuild -exportArchive \
     -archivePath "$ARCHIVE" \
     -exportOptionsPlist build-archive/ExportOptions.plist \
     -exportPath build-archive/export \
     -allowProvisioningUpdates \
-    -authenticationKeyPath "$KEY_PATH" \
-    -authenticationKeyID "$ASC_KEY_ID" \
-    -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
     | tail -5
 
 echo "✓ Build $BUILD_NUMBER uploaded — App Store Connect → TestFlight."
