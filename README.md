@@ -129,3 +129,7 @@ ink=121971 mask=off sep=79 border=19 edge=0
 
 The test fixtures are real kid drawings photographed with this app — the
 exact frames that once broke the pipeline.
+
+## License
+
+[MIT](LICENSE) — use it however you like, just keep the attribution.
