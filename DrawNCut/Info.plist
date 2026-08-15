@@ -44,7 +44,7 @@
 			<key>UTTypeDescription</key>
 			<string>DXF Drawing</string>
 			<key>UTTypeIdentifier</key>
-			<string>studio.irl.drawncut.dxf</string>
+			<string>com.irllabs.drawncut.dxf</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

@@ -7,7 +7,7 @@
 #   2. Save the downloaded .p8 as
 #      ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8
 #   3. Create the app record once in App Store Connect (My Apps → + → New App,
-#      bundle ID studio.irl.DrawNCut). The API cannot create app records.
+#      bundle ID com.irllabs.drawncut). The API cannot create app records.
 #
 # Usage:
 #   ASC_KEY_ID=XXXXXXXXXX ASC_ISSUER_ID=xxxxxxxx-....  scripts/deploy-testflight.sh
@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.."
 KEY_PATH="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8}"
 [ -f "$KEY_PATH" ] || { echo "API key not found at $KEY_PATH" >&2; exit 1; }
 
-TEAM_ID="${TEAM_ID:-AR464XUK46}"
+TEAM_ID="${TEAM_ID:-V9DBGV72NL}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(git rev-list --count HEAD)}"
 ARCHIVE=build-archive/DrawNCut.xcarchive
 
