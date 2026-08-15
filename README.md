@@ -59,6 +59,30 @@ xcodegen generate
 open DrawNCut.xcodeproj
 ```
 
+## Deploying to TestFlight
+
+Requires a paid Apple Developer membership and an App Store Connect API key.
+
+One-time setup:
+
+1. App Store Connect → Users and Access → Integrations → Team Keys →
+   Generate API Key (role **App Manager**). Note the Key ID and Issuer ID.
+2. Save the downloaded `.p8` as
+   `~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8`.
+3. Create the app record once: App Store Connect → My Apps → **+** → New App
+   (platform iOS, bundle ID `com.alimomeni.drawncut`).
+
+Then every deploy is one command:
+
+```sh
+ASC_KEY_ID=XXXXXXXXXX ASC_ISSUER_ID=xxxxxxxx-xxxx-... scripts/deploy-testflight.sh
+```
+
+The script archives Release, signs with cloud-managed certificates
+(`-allowProvisioningUpdates` — no local cert wrangling), uploads to App Store
+Connect, and stamps the build number from the git commit count so it's
+monotonic and never needs manual bumping.
+
 ## Tests
 
 ```sh

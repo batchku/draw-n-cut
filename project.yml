@@ -11,6 +11,10 @@ settings:
     GENERATE_INFOPLIST_FILE: false
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: V9DBGV72NL
+    # TestFlight versioning: the build number is overridden per upload by
+    # scripts/deploy-testflight.sh (git commit count).
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
   configs:
     # The trace pipeline is heavy numeric Swift; unoptimized it takes tens of
     # seconds per page. Keep -O in Debug so on-device testing feels real.
@@ -44,6 +48,11 @@ targets:
       path: DrawNCut/Info.plist
       properties:
         CFBundleDisplayName: Draw'n'Cut
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Everything runs on-device; no custom encryption. Answering here
+        # skips App Store Connect's export-compliance prompt on every build.
+        ITSAppUsesNonExemptEncryption: false
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait

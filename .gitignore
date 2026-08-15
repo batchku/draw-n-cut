@@ -16,3 +16,4 @@ build/
 .claude/worktrees/
 build-ios/
 build-sim/
+build-archive/
