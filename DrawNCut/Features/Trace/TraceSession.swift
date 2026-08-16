@@ -21,6 +21,9 @@ struct TraceSnapshot: Codable {
     var cutTaps: [[Double]]? = nil
     /// Frozen point-edited geometry, when the user reshaped the trace.
     var editedPaths: [SnapshotEditedPath]? = nil
+    /// True once frozen geometry also carries the cut outline (older
+    /// versions saved traced paths only).
+    var editedPathsIncludeOutlines: Bool? = nil
 }
 
 /// One point-edited path as saved in a version: raw points, closure, role.
@@ -417,12 +420,83 @@ final class TraceSession {
         var point: Int
     }
 
-    /// Freezes the current trace (with its cut promotions) into editable
-    /// geometry. No-op when already editing.
+    /// Freezes the current trace (with its cut promotions) AND the cut
+    /// outline into editable geometry — outline points drag, join, and brush
+    /// like any others. No-op when already editing. While frozen, the live
+    /// `cutOutlines` are neither drawn nor exported (their frozen copies
+    /// are), so slider-derived outlines can't double up.
     func beginPointEditing() {
         guard editedPaths == nil else { return }
         editedPaths = visible.map {
             EditablePath(polyline: $0.polyline, isCut: cutTargets.contains($0.key))
+        } + cutOutlines.map {
+            EditablePath(polyline: $0, isCut: true)
+        }
+    }
+
+    /// Locally smooths every path span within `radius` of the swept marker
+    /// segment: strong simplification plus a rounding pass, anchored just
+    /// outside the touched span so the result blends in. Called per touch
+    /// sample — overlapping sweeps compound, so scrubbing smooths harder.
+    func brushSmooth(from previous: SIMD2<Double>?, to point: SIMD2<Double>, radius: Double) {
+        guard let paths = editedPaths else { return }
+        let stroke = previous.map { [$0, point] } ?? [point]
+        editedPaths = Self.brushSmoothed(paths, stroke: stroke, radius: radius)
+    }
+
+    nonisolated static func brushSmoothed(
+        _ paths: [EditablePath], stroke: [SIMD2<Double>], radius: Double
+    ) -> [EditablePath] {
+        guard !stroke.isEmpty, radius > 0 else { return paths }
+        func distanceToStroke(_ p: SIMD2<Double>) -> Double {
+            guard stroke.count > 1 else { return simd_length(p - stroke[0]) }
+            var best = Double.infinity
+            for i in 0..<(stroke.count - 1) {
+                best = min(best, PathGeometry.distanceToSegment(p, stroke[i], stroke[i + 1]))
+            }
+            return best
+        }
+        let tolerance = 0.25 * radius
+        return paths.map { path in
+            var polyline = path.polyline
+            guard polyline.points.count > 2 else { return path }
+            var hit = polyline.points.map { distanceToStroke($0) <= radius }
+            guard hit.contains(true) else { return path }
+
+            if polyline.isClosed {
+                guard let pivot = hit.firstIndex(of: false) else {
+                    // The whole loop is under the marker: smooth it whole.
+                    let eased = PathGeometry.smoothed(
+                        PathGeometry.simplified(polyline, tolerance: tolerance), passes: 1)
+                    return EditablePath(polyline: eased, isCut: path.isCut)
+                }
+                // A closed loop's start is arbitrary — rotate the seam onto
+                // an untouched point so spans never wrap.
+                polyline.points = Array(polyline.points[pivot...] + polyline.points[..<pivot])
+                hit = Array(hit[pivot...] + hit[..<pivot])
+            }
+
+            // Each maximal touched run, widened by one anchor point per
+            // side. Replaced right-to-left so earlier indices stay valid;
+            // simplify + Chaikin both pin the anchors, so spans blend in.
+            var points = polyline.points
+            var spans: [(start: Int, end: Int)] = []
+            var index = 0
+            while index < hit.count {
+                guard hit[index] else { index += 1; continue }
+                var runEnd = index
+                while runEnd + 1 < hit.count && hit[runEnd + 1] { runEnd += 1 }
+                spans.append((max(0, index - 1), min(hit.count - 1, runEnd + 1)))
+                index = runEnd + 1
+            }
+            for span in spans.reversed() where span.end - span.start >= 2 {
+                let piece = Polyline(points: Array(points[span.start...span.end]), isClosed: false)
+                let eased = PathGeometry.smoothed(
+                    PathGeometry.simplified(piece, tolerance: tolerance), passes: 1)
+                points.replaceSubrange(span.start...span.end, with: eased.points)
+            }
+            polyline.points = points
+            return EditablePath(polyline: polyline, isCut: path.isCut)
         }
     }
 
@@ -686,7 +760,8 @@ final class TraceSession {
                         isCut: path.isCut
                     )
                 }
-            })
+            },
+            editedPathsIncludeOutlines: editedPaths != nil)
         let data = try JSONEncoder().encode(snapshot)
         _ = try store.addTraceVersion(to: project, detail: detail, pathsData: data)
         syncProject()
@@ -733,6 +808,12 @@ final class TraceSession {
                 )
             }
         }
+        // Versions saved before the outline was absorbed into the frozen set
+        // would otherwise lose their red cut loop (live outlines are hidden
+        // while edits exist) — graft the current outline in.
+        if pendingRestoredEdits != nil, snapshot.editedPathsIncludeOutlines != true {
+            pendingRestoredEdits! += cutOutlines.map { EditablePath(polyline: $0, isCut: true) }
+        }
         if detail == snapshot.detail {
             scheduleRetrace(debounce: false)
         } else {
@@ -774,15 +855,18 @@ final class TraceSession {
     func exportDXF(widthMM: Double) throws -> URL {
         let engrave: [Polyline]
         let promoted: [Polyline]
+        let cuts: [Polyline]
         if let editedPaths {
+            // Frozen geometry already contains the cut outline.
             engrave = editedPaths.filter { !$0.isCut }.map(\.polyline)
-            promoted = editedPaths.filter(\.isCut).map(\.polyline)
+            cuts = editedPaths.filter(\.isCut).map(\.polyline)
         } else {
             engrave = visible.filter { !cutTargets.contains($0.key) }.map(\.polyline)
             promoted = visible.filter { cutTargets.contains($0.key) }.map(\.polyline)
+            cuts = cutOutlines + promoted
         }
         let dxf = DXFExportBuilder.dxf(
-            from: engrave, cutOutlines: cutOutlines + promoted, widthMM: widthMM)
+            from: engrave, cutOutlines: cuts, widthMM: widthMM)
         let directory = store.exportsDirectory(for: project)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let existing = (try? FileManager.default.contentsOfDirectory(atPath: directory.path))?.count ?? 0

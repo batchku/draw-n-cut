@@ -92,6 +92,17 @@ final class EndToEndTests: XCTestCase {
         XCTAssertTrue(canvas.exists, "canvas must survive point drags")
         let pathsAfter = try waitForTracedPaths(on: canvas, timeout: 10)
         XCTAssertGreaterThan(pathsAfter, 0, "paths must still render after point edits")
+
+        // Then the smoothing marker: sweep across the fish, live-smoothing
+        // whatever lies under the stroke.
+        let brush = app.buttons["smoothBrushToggle"].firstMatch
+        XCTAssertTrue(brush.waitForExistence(timeout: 5), "marker button should exist")
+        brush.tap()
+        let sweepStart = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5))
+        let sweepEnd = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.52))
+        sweepStart.press(forDuration: 0.2, thenDragTo: sweepEnd)
+        attachScreenshot(of: app, named: "smooth-brush-after-sweep")
+        XCTAssertTrue(canvas.exists, "canvas must survive the smoothing marker")
     }
 
     private func waitForTracedPaths(on canvas: XCUIElement, timeout: TimeInterval) throws -> Int {

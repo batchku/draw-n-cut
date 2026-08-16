@@ -97,6 +97,58 @@ struct PointEditTests {
         #expect(points.last == SIMD2(0, 100), "b reversed so its snapped end receives the join")
     }
 
+    // MARK: - Smoothing marker
+
+    @Test func brushStraightensOnlyWhatItTouches() {
+        // A zigzag along y=0: ±6 jags every 5px from x=0 to x=100.
+        var zigzag: [SIMD2<Double>] = []
+        for i in 0...20 {
+            var y: Double = 0
+            if i % 2 != 0 { y = i % 4 == 1 ? 6 : -6 }
+            zigzag.append(SIMD2(Double(i) * 5, y))
+        }
+        let paths = [open(zigzag)]
+        // Sweep the marker along the middle (x 35...65) at radius 12.
+        let stroke = [SIMD2(35.0, 0.0), SIMD2(65.0, 0.0)]
+        let brushed = TraceSession.brushSmoothed(paths, stroke: stroke, radius: 12)
+
+        #expect(brushed.count == 1)
+        let points = brushed[0].polyline.points
+        #expect(points.first == zigzag.first, "path endpoints must not move")
+        #expect(points.last == zigzag.last)
+        // Untouched head keeps its jags exactly.
+        #expect(points[1] == zigzag[1])
+        // The brushed middle flattened: nothing in x 40...60 keeps a full jag.
+        let middle = points.filter { $0.x > 40 && $0.x < 60 }
+        #expect(!middle.isEmpty)
+        #expect(middle.allSatisfy { abs($0.y) < 6 }, "brushed jags must shrink, got \(middle)")
+    }
+
+    @Test func brushKeepsClosedLoopsClosedAndSparesFarCorners() {
+        // A square with a jagged top edge.
+        var points: [SIMD2<Double>] = []
+        for i in 0...10 { points.append(SIMD2(Double(i) * 10, i % 2 == 0 ? 0.0 : 5.0)) }
+        points += [SIMD2(100, 100), SIMD2(0, 100)]
+        let loop = EditablePath(polyline: Polyline(points: points, isClosed: true), isCut: true)
+
+        let brushed = TraceSession.brushSmoothed(
+            [loop], stroke: [SIMD2(10.0, 2.0), SIMD2(90.0, 2.0)], radius: 10)
+        let result = brushed[0].polyline
+        #expect(result.isClosed, "brushing must never open a closed loop")
+        #expect(brushed[0].isCut)
+        #expect(result.points.contains(SIMD2(100, 100)), "far corners stay put")
+        #expect(result.points.contains(SIMD2(0, 100)))
+        let topJags = result.points.filter { $0.y > 0 && $0.y < 100 && $0.x > 15 && $0.x < 85 }
+        #expect(topJags.allSatisfy { $0.y < 5 }, "top jags must shrink, got \(topJags)")
+    }
+
+    @Test func brushIgnoresPathsOutOfReach() {
+        let far = open([SIMD2(0, 500), SIMD2(100, 500)])
+        let brushed = TraceSession.brushSmoothed(
+            [far], stroke: [SIMD2(0.0, 0.0), SIMD2(100.0, 0.0)], radius: 12)
+        #expect(brushed[0].polyline.points == far.polyline.points)
+    }
+
     // MARK: - Snap tween
 
     @Test func snapTweenEasesOutMonotonically() {
@@ -152,6 +204,43 @@ struct PointEditTests {
                 #expect(center.y + LoupeGeometry.radius <= 800.001)
             }
         }
+    }
+
+    /// Freezing for editing must absorb the mask-derived cut outline so its
+    /// points drag and its jagged spans brush like any other path.
+    @MainActor
+    @Test(.timeLimit(.minutes(2)))
+    func freezingAbsorbsTheCutOutline() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "PointEditTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = ProjectStore(rootURL: root)
+        let project = try store.create(title: "Fish")
+        try FileManager.default.copyItem(
+            at: try FixtureTraceTests.fixtureURL("fish-circle-shadow-photo", extension: "jpg"),
+            to: store.originalImageURL(for: project))
+        try FileManager.default.copyItem(
+            at: try FixtureTraceTests.fixtureURL("fish-circle-shadow-mask", extension: "png"),
+            to: store.maskURL(for: project))
+
+        let session = TraceSession(project: project, store: store)
+        await session.load()
+        for _ in 0..<600 where session.result == nil || session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try #require(!session.cutOutlines.isEmpty, "the mask must yield a cut outline")
+
+        session.beginPointEditing()
+        let paths = try #require(session.editedPaths)
+        let frozenCuts = paths.filter { $0.isCut && $0.polyline.isClosed }
+        #expect(!frozenCuts.isEmpty, "the cut outline must join the editable set")
+
+        // And it exports from the frozen set (still on the CUT layer).
+        let url = try session.exportDXF(widthMM: 100)
+        let dxf = try String(contentsOf: url, encoding: .utf8)
+        #expect(dxf.contains("8\r\nCUT"))
     }
 
     // MARK: - Session integration

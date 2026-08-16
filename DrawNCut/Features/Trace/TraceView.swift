@@ -14,6 +14,7 @@ struct TraceView: View {
     @State private var saveConfirmation = false
     @State private var eraserMode = false
     @State private var pointEditMode = false
+    @State private var brushMode = false
 
     var body: some View {
         Group {
@@ -43,10 +44,12 @@ struct TraceView: View {
     @ViewBuilder
     private func content(_ session: TraceSession) -> some View {
         VStack(spacing: 0) {
-            TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode, pointEditMode: pointEditMode)
+            TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode,
+                        pointEditMode: pointEditMode, brushMode: brushMode)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) {
-                    if session.pendingSuggestionCount > 0 && !session.suggestionsApplied && !pointEditMode {
+                    if session.pendingSuggestionCount > 0 && !session.suggestionsApplied
+                        && !pointEditMode && !brushMode {
                         suggestionBanner(session)
                     }
                 }
@@ -104,8 +107,8 @@ struct TraceView: View {
                 sliderRow("Detail", value: $session.detail, tint: .blue)
                 sliderRow("Smoothing", value: $session.smoothness, tint: .blue)
             }
-            .disabled(pointEditMode)
-            .opacity(pointEditMode ? 0.35 : 1)
+            .disabled(pointEditMode || brushMode)
+            .opacity(pointEditMode || brushMode ? 0.35 : 1)
             HStack(spacing: 16) {
                 Toggle(isOn: $pointEditMode) {
                     Text("Points")
@@ -117,6 +120,7 @@ struct TraceView: View {
                 .onChange(of: pointEditMode) { _, on in
                     if on {
                         eraserMode = false
+                        brushMode = false
                         session.beginPointEditing()
                     }
                 }
@@ -133,8 +137,25 @@ struct TraceView: View {
                 .disabled(session.eraseShapes.isEmpty)
                 .accessibilityLabel("Undo erase")
                 Button {
+                    brushMode.toggle()
+                    if brushMode {
+                        eraserMode = false
+                        pointEditMode = false
+                        session.beginPointEditing()
+                    }
+                } label: {
+                    Image(systemName: "paintbrush.pointed.fill")
+                        .font(.title2)
+                        .foregroundStyle(brushMode ? Color.accentColor : Color.secondary)
+                }
+                .accessibilityLabel(brushMode ? "Smoothing marker on" : "Smoothing marker off")
+                .accessibilityIdentifier("smoothBrushToggle")
+                Button {
                     eraserMode.toggle()
-                    if eraserMode { pointEditMode = false }
+                    if eraserMode {
+                        pointEditMode = false
+                        brushMode = false
+                    }
                 } label: {
                     Image(systemName: eraserMode ? "eraser.fill" : "eraser")
                         .font(.title2)
@@ -170,6 +191,9 @@ struct TraceView: View {
     private var hint: String {
         if pointEditMode {
             return "Drag points • drop an endpoint on another to join"
+        }
+        if brushMode {
+            return "Sweep over jagged lines to smooth • scrub for more"
         }
         if eraserMode {
             return "Circle around things to erase • two-finger tap undoes"
@@ -295,6 +319,7 @@ private struct TraceCanvas: View {
     let showPhoto: Bool
     let eraserMode: Bool
     let pointEditMode: Bool
+    let brushMode: Bool
 
     @State private var zoom: CGFloat = 1
     @State private var panOffset: CGSize = .zero
@@ -316,6 +341,11 @@ private struct TraceCanvas: View {
     private let pointGrabViewRadius: CGFloat = 24
     /// Magnetic range for endpoint-to-endpoint snapping (view pt).
     private let snapViewRadius: CGFloat = 16
+    /// Half-width of the smoothing marker (view pt) — a thick pen. Zooming
+    /// in narrows it in image space for finer, gentler smoothing.
+    private let brushViewRadius: CGFloat = 24
+    /// The marker trail while the finger sweeps, in view coordinates.
+    @State private var brushViewPoints: [CGPoint] = []
 
     var body: some View {
         GeometryReader { geometry in
@@ -331,6 +361,18 @@ private struct TraceCanvas: View {
 
             Canvas { context, size in
                 drawScene(context, scale: scale, offset: offset)
+                // The smoothing marker's trail — a thick translucent pen.
+                if brushViewPoints.count > 1 {
+                    var trail = Path()
+                    trail.move(to: brushViewPoints[0])
+                    for point in brushViewPoints.dropFirst() { trail.addLine(to: point) }
+                    context.stroke(
+                        trail,
+                        with: .color(.orange.opacity(0.3)),
+                        style: StrokeStyle(
+                            lineWidth: 2 * brushViewRadius, lineCap: .round, lineJoin: .round)
+                    )
+                }
                 // The lasso being drawn right now (never magnified).
                 if lassoViewPoints.count > 1 {
                     var lasso = Path()
@@ -375,12 +417,23 @@ private struct TraceCanvas: View {
                 // One-finger drags are claimed by whichever edit mode is on:
                 // lasso collection for the eraser, point dragging for point
                 // editing. Two-finger pan/pinch stays available in both.
-                TouchOverlay(eraserActive: eraserMode || pointEditMode) { previous, current in
+                TouchOverlay(eraserActive: eraserMode || pointEditMode || brushMode) { previous, current in
                     let toImage = { (p: CGPoint) in
                         SIMD2(
                             (p.x - offset.width) / scale,
                             (p.y - offset.height) / scale
                         )
+                    }
+                    if brushMode {
+                        // Live: every swept segment smooths what's under it
+                        // immediately; scrubbing compounds.
+                        brushViewPoints.append(current)
+                        session.brushSmooth(
+                            from: previous.map(toImage),
+                            to: toImage(current),
+                            radius: brushViewRadius / scale
+                        )
+                        return
                     }
                     if pointEditMode {
                         let location = toImage(current)
@@ -419,6 +472,10 @@ private struct TraceCanvas: View {
                         lassoViewPoints.append(current)
                     }
                 } onEraseEnd: {
+                    if brushMode {
+                        brushViewPoints = []
+                        return
+                    }
                     if pointEditMode {
                         snapTweenTask?.cancel()
                         snapTweenTask = nil
@@ -463,8 +520,8 @@ private struct TraceCanvas: View {
                     session.undoErase()
                 } onSingleTap: { location in
                     // Tap a blue line → cut (red); tap again → engrave (blue).
-                    // While editing points, taps belong to the drag gesture.
-                    guard !pointEditMode else { return }
+                    // While editing points or brushing, taps belong to those.
+                    guard !pointEditMode && !brushMode else { return }
                     session.toggleCut(at: SIMD2(
                         (location.x - offset.width) / scale,
                         (location.y - offset.height) / scale
@@ -535,14 +592,17 @@ private struct TraceCanvas: View {
             }
         }
         // The CUT loops (piece edges and holes) — drawn last so they
-        // read as the piece's edges. Red like the DXF CUT layer. Not
-        // erasable: they aren't traced polylines.
-        for outline in session.cutOutlines {
-            context.stroke(
-                path(for: outline, scale: scale, offset: offset),
-                with: .color(.red),
-                lineWidth: 3
-            )
+        // read as the piece's edges. Red like the DXF CUT layer. While
+        // frozen geometry exists it already contains them, so the live
+        // outlines stay hidden (they'd double up).
+        if session.editedPaths == nil {
+            for outline in session.cutOutlines {
+                context.stroke(
+                    path(for: outline, scale: scale, offset: offset),
+                    with: .color(.red),
+                    lineWidth: 3
+                )
+            }
         }
         // Control-point handles. Endpoints draw bigger — they're the
         // joinable ones. Handle size is constant on screen, not in
