@@ -97,6 +97,26 @@ struct PointEditTests {
         #expect(points.last == SIMD2(0, 100), "b reversed so its snapped end receives the join")
     }
 
+    // MARK: - Snap tween
+
+    @Test func snapTweenEasesOutMonotonically() {
+        #expect(SnapTween.progress(0) == 0)
+        #expect(SnapTween.progress(1) == 1)
+        #expect(SnapTween.progress(1.5) == 1, "overshoot clamps at the magnet")
+        #expect(SnapTween.progress(-0.5) == 0)
+        // Strictly increasing, and front-loaded (ease-out): more than half
+        // the distance is covered in the first half of the time.
+        var last = 0.0
+        for step in 1...20 {
+            let value = SnapTween.progress(Double(step) / 20)
+            #expect(value >= last)
+            last = value
+        }
+        #expect(SnapTween.progress(0.5) > 0.5)
+        // The whole glide is meant to be felt: a couple hundred ms.
+        #expect(SnapTween.duration >= 0.15 && SnapTween.duration <= 0.4)
+    }
+
     // MARK: - Drag loupe placement
 
     @Test func loupeSitsTopRightOfTheFinger() {

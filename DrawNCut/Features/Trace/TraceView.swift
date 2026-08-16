@@ -252,6 +252,19 @@ struct TraceView: View {
     }
 }
 
+/// The snap-in glide: when a dragged point engages a magnet it eases onto it
+/// over a fifth of a second instead of teleporting — at loupe magnification
+/// an instant jump reads as a jarring jolt. Pure math so it's testable.
+enum SnapTween {
+    static let duration: Double = 0.22
+    /// Ease-out cubic progress for a normalized time 0...1: fast start,
+    /// gentle landing on the magnet.
+    static func progress(_ t: Double) -> Double {
+        let clamped = min(max(t, 0), 1)
+        return 1 - pow(1 - clamped, 3)
+    }
+}
+
 /// Where the point-drag loupe sits relative to the finger: above and to the
 /// right by default, flipping side/vertical near viewport edges, finally
 /// clamped fully on-screen. Pure math so it's directly testable.
@@ -294,6 +307,8 @@ private struct TraceCanvas: View {
     @State private var snapRef: TraceSession.PointRef?
     /// Where the finger is right now (view space) — anchors the drag loupe.
     @State private var dragViewLocation: CGPoint?
+    /// The in-flight snap glide, while a dragged point eases onto a magnet.
+    @State private var snapTweenTask: Task<Void, Never>?
 
     /// Spot-erase radius as the finger experiences it, regardless of zoom.
     private let eraserViewRadius: CGFloat = 22
@@ -373,16 +388,26 @@ private struct TraceCanvas: View {
                             dragRef = session.editablePoint(
                                 near: location, radius: pointGrabViewRadius / scale)
                             snapRef = nil
+                            snapTweenTask?.cancel()
+                            snapTweenTask = nil
                         }
                         guard let ref = dragRef else { return }
                         dragViewLocation = current
                         if let target = session.snapTarget(
                             for: ref, near: location, radius: snapViewRadius / scale),
                            let magnet = session.position(of: target) {
-                            snapRef = target
-                            session.movePoint(ref, to: magnet)
+                            if snapRef != target {
+                                // Newly magnetized: glide onto the magnet
+                                // instead of teleporting.
+                                snapRef = target
+                                startSnapTween(ref: ref, to: magnet)
+                            } else if snapTweenTask == nil {
+                                session.movePoint(ref, to: magnet)
+                            }
                         } else {
                             snapRef = nil
+                            snapTweenTask?.cancel()
+                            snapTweenTask = nil
                             session.movePoint(ref, to: location)
                         }
                         return
@@ -395,7 +420,14 @@ private struct TraceCanvas: View {
                     }
                 } onEraseEnd: {
                     if pointEditMode {
+                        snapTweenTask?.cancel()
+                        snapTweenTask = nil
                         if let ref = dragRef {
+                            // Released mid-glide: land exactly on the magnet
+                            // before joining.
+                            if let snapRef, let magnet = session.position(of: snapRef) {
+                                session.movePoint(ref, to: magnet)
+                            }
                             session.endPointDrag(ref, snappedTo: snapRef)
                         }
                         dragRef = nil
@@ -441,6 +473,25 @@ private struct TraceCanvas: View {
             }
         }
         .background(Color.white)
+    }
+
+    /// Eases the dragged point from where it is onto the magnet, ~60fps for
+    /// SnapTween.duration. Cancelled when the finger pulls off the magnet or
+    /// lifts; the release handler pins the exact magnet position regardless.
+    private func startSnapTween(ref: TraceSession.PointRef, to magnet: SIMD2<Double>) {
+        snapTweenTask?.cancel()
+        guard let from = session.position(of: ref) else { return }
+        snapTweenTask = Task { @MainActor in
+            let started = Date()
+            while !Task.isCancelled {
+                let t = Date().timeIntervalSince(started) / SnapTween.duration
+                let eased = SnapTween.progress(t)
+                session.movePoint(ref, to: from + (magnet - from) * eased)
+                if t >= 1 { break }
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            if !Task.isCancelled { snapTweenTask = nil }
+        }
     }
 
     /// Everything that belongs to the drawing itself — photo, paths, cut
