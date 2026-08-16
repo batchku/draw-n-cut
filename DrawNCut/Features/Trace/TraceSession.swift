@@ -111,6 +111,10 @@ final class TraceSession {
     /// Every erase gesture, in image space. Rasterized into a mask and
     /// subtracted from the ink before each trace.
     private(set) var eraseShapes: [EraseShape] = []
+    /// Undo granularity: each user action (one lasso, one spot, one
+    /// suggestions-Apply) contributes one batch of shapes; undo removes a
+    /// whole batch — pressing undo after Apply brings ALL its lines back.
+    private var eraseBatchSizes: [Int] = []
 
     private var textRegions: [CGRect] = []
     private var retraceTask: Task<Void, Never>?
@@ -263,6 +267,11 @@ final class TraceSession {
         let d = max(0, min(1, detail))
         let s = max(0, min(1, smoothness))
         let diagonal = Double(mask.width * mask.width + mask.height * mask.height).squareRoot()
+        // Piecewise-linear through the default look at detail 0.7; the
+        // coarse end doubled so the slider's range is unmistakable.
+        let tolerance = d <= 0.7
+            ? 16 + (2.9 - 16) * (d / 0.7)
+            : 2.9 + (0.5 - 2.9) * ((d - 0.7) / 0.3)
         return MaskGeometry.cutContours(
             of: mask,
             snappedTo: ink,
@@ -270,8 +279,8 @@ final class TraceSession {
             // ~50px at a 2500px diagonal), small enough not to reach interior
             // features like an eye.
             snapDistance: 0.02 * diagonal,
-            simplifyTolerance: 8 - (8 - 0.75) * d,
-            smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : 2
+            simplifyTolerance: tolerance,
+            smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : s < 0.85 ? 2 : 3
         )
     }
 
@@ -669,6 +678,7 @@ final class TraceSession {
     func eraseLasso(points: [SIMD2<Double>]) {
         guard points.count >= 3 else { return }
         eraseShapes.append(.lasso(points: points))
+        eraseBatchSizes.append(1)
         if let result {
             for (e, element) in result.elements.enumerated() {
                 for (p, polyline) in element.polylines.enumerated() {
@@ -686,6 +696,7 @@ final class TraceSession {
     /// polyline-level feedback like the lasso.
     func eraseSpot(at point: SIMD2<Double>, radius: Double) {
         eraseShapes.append(.brush(points: [point], radius: radius))
+        eraseBatchSizes.append(1)
         for key in targets(within: radius, of: point) {
             removedTargets.insert(key)
         }
@@ -694,13 +705,15 @@ final class TraceSession {
 
     func undoErase() {
         guard !eraseShapes.isEmpty else { return }
-        eraseShapes.removeLast()
+        let batch = eraseBatchSizes.popLast() ?? 1
+        eraseShapes.removeLast(min(batch, eraseShapes.count))
         suggestionsApplied = false
         scheduleRetrace(debounce: false)
     }
 
     func resetErases() {
         eraseShapes.removeAll()
+        eraseBatchSizes.removeAll()
         suggestionsApplied = false
         scheduleRetrace(debounce: false)
     }
@@ -729,6 +742,7 @@ final class TraceSession {
     /// erase mask (so it persists across re-traces and into versions).
     func applySuggestions() {
         guard let result else { return }
+        var added = 0
         for key in suggestionsByTarget.keys where !removedTargets.contains(key) {
             let element = result.elements[key.elementIndex]
             let polyline = element.polylines[key.polylineIndex]
@@ -740,7 +754,10 @@ final class TraceSession {
             let radius = max(3, 1.5 * element.estimatedStrokeWidth)
             eraseShapes.append(.brush(points: points, radius: radius))
             removedTargets.insert(key)
+            added += 1
         }
+        // One undo press restores everything this Apply removed.
+        if added > 0 { eraseBatchSizes.append(added) }
         suggestionsApplied = true
         scheduleRetrace(debounce: false)
     }
@@ -771,6 +788,7 @@ final class TraceSession {
         let url = store.tracePathsURL(for: version, in: project)
         guard let data = try? Data(contentsOf: url),
               let snapshot = try? JSONDecoder().decode(TraceSnapshot.self, from: data) else { return }
+        defer { eraseBatchSizes = eraseShapes.map { _ in 1 } }
         if let shapes = snapshot.eraseShapes {
             eraseShapes = shapes
         } else {

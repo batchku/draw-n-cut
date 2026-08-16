@@ -76,11 +76,19 @@ struct TraceView: View {
         }
     }
 
+    /// These are REMOVAL suggestions from the app's own heuristics (not the
+    /// segmentation model): highlighted lines look like page clutter — an
+    /// enclosing circle, handwriting, edge junk — and the button deletes
+    /// them. The wording must say so; "apply corrections" once read as
+    /// "fix them" and surprised the user when lines vanished.
     private func suggestionBanner(_ session: TraceSession) -> some View {
         HStack(spacing: 12) {
-            Label("\(session.pendingSuggestionCount) cleanup suggestions", systemImage: "wand.and.stars")
-                .font(.footnote)
-            Button("Apply") { session.applySuggestions() }
+            Label(
+                "\(session.pendingSuggestionCount) highlighted lines look like page clutter",
+                systemImage: "wand.and.stars"
+            )
+            .font(.footnote)
+            Button("Remove", role: .destructive) { session.applySuggestions() }
                 .font(.footnote.bold())
         }
         .padding(.horizontal, 14)

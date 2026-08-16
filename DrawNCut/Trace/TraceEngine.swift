@@ -32,16 +32,24 @@ struct TraceParameters: Equatable {
     ) -> TraceParameters {
         let d = max(0, min(1, detail))
         let s = max(0, min(1, smoothness))
-        func lerp(_ coarse: Double, _ fine: Double) -> Double {
-            coarse + (fine - coarse) * d
+        // Piecewise-linear through the long-standing look at detail 0.7:
+        // the middle of the range stays familiar while the extremes spread
+        // much further — full-left now culls aggressively, full-right keeps
+        // nearly everything.
+        func wide(_ coarse: Double, _ anchor: Double, _ fine: Double) -> Double {
+            d <= 0.7 ? coarse + (anchor - coarse) * (d / 0.7)
+                     : anchor + (fine - anchor) * ((d - 0.7) / 0.3)
         }
         let unit = imageDiagonal / 1000.0   // ≈1px at 1000px diagonal
-        let speckleSide = lerp(12, 2) * unit
+        let speckleSide = wide(20, 5, 1.5) * unit
         return TraceParameters(
             speckleMinArea: max(2, Int(speckleSide * speckleSide)),
-            minPolylineLength: lerp(30, 3) * unit,
-            simplifyTolerance: (0.5 + 2.5 * s) * unit,
-            smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : 2
+            minPolylineLength: wide(60, 11, 2) * unit,
+            // Quadratic through the default (0.4 → 1.5): the top end now
+            // simplifies twice as hard as before so "all the way up" reads
+            // unmistakably smooth.
+            simplifyTolerance: (0.4 + 0.85 * s + 4.75 * s * s) * unit,
+            smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : s < 0.85 ? 2 : 3
         )
     }
 }

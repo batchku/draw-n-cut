@@ -102,7 +102,10 @@ final class EndToEndTests: XCTestCase {
         let sweepEnd = canvas.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.52))
         sweepStart.press(forDuration: 0.2, thenDragTo: sweepEnd)
         attachScreenshot(of: app, named: "smooth-brush-after-sweep")
-        XCTAssertTrue(canvas.exists, "canvas must survive the smoothing marker")
+        // waitForExistence, not .exists: right after a gesture the element
+        // query can transiently miss while the app re-renders under load.
+        XCTAssertTrue(canvas.waitForExistence(timeout: 10),
+                      "canvas must survive the smoothing marker")
     }
 
     private func waitForTracedPaths(on canvas: XCUIElement, timeout: TimeInterval) throws -> Int {

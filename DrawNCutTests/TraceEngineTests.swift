@@ -114,4 +114,27 @@ struct TraceEngineTests {
         #expect(jagged.speckleMinArea == smooth.speckleMinArea)
         #expect(jagged.minPolylineLength == smooth.minPolylineLength)
     }
+
+    /// The sliders' extremes must be unmistakable: max smoothness simplifies
+    /// hard with triple rounding, and the Detail range spreads wide — while
+    /// the long-standing defaults keep their exact look.
+    @Test func sliderExtremesAreWideAndDefaultsAnchored() {
+        let maxSmooth = TraceParameters.from(detail: 0.7, smoothness: 1, imageDiagonal: 1000)
+        #expect(maxSmooth.simplifyTolerance >= 5.5, "got \(maxSmooth.simplifyTolerance)")
+        #expect(maxSmooth.smoothingPasses == 3)
+
+        let coarse = TraceParameters.from(detail: 0, imageDiagonal: 1000)
+        let fine = TraceParameters.from(detail: 1, imageDiagonal: 1000)
+        #expect(coarse.minPolylineLength >= 50, "full-left must cull aggressively")
+        #expect(fine.minPolylineLength <= 3, "full-right must keep nearly everything")
+        #expect(coarse.speckleMinArea >= 300)
+
+        // The defaults are anchored: detail 0.7 / smoothness 0.4 look as
+        // they always did.
+        let anchored = TraceParameters.from(detail: 0.7, smoothness: 0.4, imageDiagonal: 1000)
+        #expect(abs(anchored.minPolylineLength - 11) < 0.5)
+        #expect(anchored.speckleMinArea == 25)
+        #expect(abs(anchored.simplifyTolerance - 1.5) < 0.05)
+        #expect(anchored.smoothingPasses == 1)
+    }
 }
