@@ -137,13 +137,13 @@ struct TraceView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Button {
-                    session.undoErase()
+                    session.undo()
                 } label: {
                     Image(systemName: "arrow.uturn.backward.circle.fill")
                         .font(.title2)
                 }
-                .disabled(session.eraseShapes.isEmpty)
-                .accessibilityLabel("Undo erase")
+                .disabled(!session.canUndo)
+                .accessibilityLabel("Undo")
                 Button {
                     brushMode.toggle()
                     if brushMode {
@@ -434,7 +434,9 @@ private struct TraceCanvas: View {
                     }
                     if brushMode {
                         // Live: every swept segment smooths what's under it
-                        // immediately; scrubbing compounds.
+                        // immediately; scrubbing compounds. One stroke =
+                        // one undo entry, bounded by the gesture.
+                        if previous == nil { session.beginEditGesture() }
                         brushViewPoints.append(current)
                         session.brushSmooth(
                             from: previous.map(toImage),
@@ -446,6 +448,9 @@ private struct TraceCanvas: View {
                     if pointEditMode {
                         let location = toImage(current)
                         if previous == nil {
+                            // One drag (including a snap-join on release) =
+                            // one undo entry; grabbing nothing records nothing.
+                            session.beginEditGesture()
                             dragRef = session.editablePoint(
                                 near: location, radius: pointGrabViewRadius / scale)
                             snapRef = nil
@@ -482,6 +487,7 @@ private struct TraceCanvas: View {
                 } onEraseEnd: {
                     if brushMode {
                         brushViewPoints = []
+                        session.endEditGesture()
                         return
                     }
                     if pointEditMode {
@@ -495,6 +501,7 @@ private struct TraceCanvas: View {
                             }
                             session.endPointDrag(ref, snappedTo: snapRef)
                         }
+                        session.endEditGesture()
                         dragRef = nil
                         snapRef = nil
                         dragViewLocation = nil
@@ -525,7 +532,7 @@ private struct TraceCanvas: View {
                     zoom = newZoom
                     clampPan(viewport: geometry.size)
                 } onTwoFingerTap: {
-                    session.undoErase()
+                    session.undo()
                 } onSingleTap: { location in
                     // Tap a blue line → cut (red); tap again → engrave (blue).
                     // While editing points or brushing, taps belong to those.
@@ -587,11 +594,7 @@ private struct TraceCanvas: View {
             }
         } else {
             for item in session.visible {
-                // Tap-promoted cut lines draw exactly like the cut
-                // outline; promotion outranks any pending suggestion.
-                let style = session.cutTargets.contains(item.key)
-                    ? (color: Color.red, emphasized: true)
-                    : color(for: item.suggestion)
+                let style = color(for: item.suggestion)
                 context.stroke(
                     path(for: item.polyline, scale: scale, offset: offset),
                     with: .color(style.color),
@@ -604,7 +607,9 @@ private struct TraceCanvas: View {
         // frozen geometry exists it already contains them, so the live
         // outlines stay hidden (they'd double up).
         if session.editedPaths == nil {
-            for outline in session.cutOutlines {
+            // Tap-promoted lines are frozen copies owned by the cut world:
+            // drawn exactly like the outline, red, on top of the blues.
+            for outline in session.cutOutlines + session.promotedCuts {
                 context.stroke(
                     path(for: outline, scale: scale, offset: offset),
                     with: .color(.red),

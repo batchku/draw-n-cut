@@ -141,10 +141,28 @@ struct MaskedTraceTests {
         #expect(dxf.contains("CUT") && dxf.contains("ENGRAVE"))
     }
 
-    /// The tap-to-cut toggle: tapping a traced line promotes it to a cut
-    /// line, tapping again demotes it, the promotion survives a re-trace
-    /// (taps replay in image space, like erasures), and a promoted line
-    /// exports on the CUT layer.
+    /// Builds a session over the fish-photo fixture and waits out its first
+    /// trace.
+    @MainActor
+    static func fishSession(root: URL) async throws -> TraceSession {
+        let store = ProjectStore(rootURL: root)
+        let project = try store.create(title: "Fish")
+        let fixtureURL = try #require(Bundle(for: MaskedTraceBundleToken.self)
+            .url(forResource: "fish-photo", withExtension: "jpg"))
+        try FileManager.default.copyItem(at: fixtureURL, to: store.originalImageURL(for: project))
+        let session = TraceSession(project: project, store: store)
+        await session.load()
+        for _ in 0..<600 where session.result == nil || session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return session
+    }
+
+    /// The tap-to-cut toggle under the frozen-promotion model: tapping a
+    /// traced line freezes a red copy into `promotedCuts` and hides the
+    /// source; tapping the frozen copy demotes it; the frozen geometry is
+    /// bitwise-immune to the Engrave sliders; and a promoted line exports on
+    /// the CUT layer (and carries into frozen point-editing as isCut).
     @MainActor
     @Test(.timeLimit(.minutes(2)))
     func tapTogglesEngraveLineToCutAndSurvivesRetrace() async throws {
@@ -153,37 +171,53 @@ struct MaskedTraceTests {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let store = ProjectStore(rootURL: root)
-        let project = try store.create(title: "Fish")
-        let fixtureURL = try #require(Bundle(for: MaskedTraceBundleToken.self)
-            .url(forResource: "fish-photo", withExtension: "jpg"))
-        try FileManager.default.copyItem(at: fixtureURL, to: store.originalImageURL(for: project))
-
-        let session = TraceSession(project: project, store: store)
-        await session.load()
-        for _ in 0..<600 where session.result == nil || session.isTracing {
-            try await Task.sleep(for: .milliseconds(100))
-        }
+        let session = try await Self.fishSession(root: root)
         let item = try #require(session.visible.first(where: { $0.polyline.points.count > 1 }))
         let mid = item.polyline.points[item.polyline.points.count / 2]
 
-        session.toggleCut(at: mid)
-        #expect(session.cutTargets.count == 1)
-        session.toggleCut(at: mid)
-        #expect(session.cutTargets.isEmpty, "second tap must demote back to engrave")
-        session.toggleCut(at: mid)
-        #expect(session.cutTargets.count == 1)
+        // Role counts of the unpromoted export, for comparison below.
+        let before = DXFExportBuilder.vectorPaths(
+            from: session.visible.map(\.polyline),
+            cutOutlines: session.cutOutlines + session.promotedCuts, widthMM: 100)
 
-        // The promotion must survive a re-trace at different smoothing.
+        session.toggleCut(at: mid)
+        #expect(session.promotedCuts.count == 1)
+        #expect(session.promotedCuts.first == item.polyline, "promotion freezes the tapped geometry")
+        #expect(!session.visible.contains { $0.key == item.key },
+                "the promoted source must hide from the engrave set")
+        session.toggleCut(at: mid)
+        #expect(session.promotedCuts.isEmpty, "second tap must demote back to engrave")
+        #expect(session.visible.contains { $0.key == item.key },
+                "demotion must bring the source line back")
+        session.toggleCut(at: mid)
+        #expect(session.promotedCuts.count == 1, "promote-demote-promote nets to one promotion")
+
+        // Every promoted line lands on CUT exactly once, its source leaves
+        // ENGRAVE.
+        let after = DXFExportBuilder.vectorPaths(
+            from: session.visible.map(\.polyline),
+            cutOutlines: session.cutOutlines + session.promotedCuts, widthMM: 100)
+        #expect(after.count(where: { $0.role == .cut })
+                == before.count(where: { $0.role == .cut }) + 1)
+        #expect(after.count(where: { $0.role == .engrave })
+                == before.count(where: { $0.role == .engrave }) - 1)
+
+        // The RED world is frozen: Engrave sliders re-trace the blues but may
+        // not reshape, add, or drop any red polyline.
+        let recordedPromotions = session.promotedCuts
+        let recordedOutlines = session.cutOutlines
         session.smoothness = 0.9
         for _ in 0..<600 where session.isTracing {
             try await Task.sleep(for: .milliseconds(100))
         }
-        #expect(session.cutTargets.count == 1, "promotion lost across re-trace")
-
-        let promotedVisible = session.visible.count { session.cutTargets.contains($0.key) }
-        #expect(promotedVisible == 1,
-                "cutTargets \(session.cutTargets) don't match visible keys (visible: \(session.visible.count), tracing: \(session.isTracing))")
+        #expect(session.promotedCuts == recordedPromotions, "smoothness must not touch promotions")
+        #expect(session.cutOutlines == recordedOutlines, "smoothness must not touch the outline")
+        session.detail = 0.4
+        for _ in 0..<600 where session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(session.promotedCuts == recordedPromotions, "detail must not touch promotions")
+        #expect(session.cutOutlines == recordedOutlines, "detail must not touch the outline")
 
         // No mask → no cut outline, so any CUT-layer entity is the promoted
         // line ("8" is DXF's layer group code on each entity; the writer
@@ -191,5 +225,150 @@ struct MaskedTraceTests {
         let url = try session.exportDXF(widthMM: 100)
         let dxf = try String(contentsOf: url, encoding: .utf8)
         #expect(dxf.contains("8\r\nCUT"), "promoted line missing from the CUT layer")
+
+        // Freezing for point editing carries the promotion as a cut path.
+        session.beginPointEditing()
+        let frozen = try #require(session.editedPaths)
+        #expect(frozen.contains { $0.isCut && $0.polyline == recordedPromotions[0] },
+                "the frozen set must carry the promotion as isCut geometry")
+    }
+
+    /// The Cut sliders own the red outline ONLY: sweeping them must never
+    /// change which blue lines are visible, their geometry, or which traced
+    /// lines the outline hides — while the outline itself does change.
+    @MainActor
+    @Test(.timeLimit(.minutes(3)))
+    func cutSlidersNeverTouchBlueLines() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "MaskedTraceTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = ProjectStore(rootURL: root)
+        let project = try store.create(title: "Fish")
+        try FileManager.default.copyItem(
+            at: try FixtureTraceTests.fixtureURL("fish-circle-shadow-photo", extension: "jpg"),
+            to: store.originalImageURL(for: project))
+        try FileManager.default.copyItem(
+            at: try FixtureTraceTests.fixtureURL("fish-circle-shadow-mask", extension: "png"),
+            to: store.maskURL(for: project))
+
+        let session = TraceSession(project: project, store: store)
+        await session.load()
+        for _ in 0..<600 where session.result == nil || session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try #require(!session.cutOutlines.isEmpty, "the mask must yield a cut outline")
+
+        let recordedKeys = session.visible.map(\.key)
+        let recordedGeometry = session.visible.map(\.polyline)
+        let recordedHidden = session.outlineTargets
+        var outlinesPerStep: [[Polyline]] = [session.cutOutlines]
+
+        func sweep(_ apply: @MainActor () -> Void) async throws {
+            let previous = session.cutOutlines
+            apply()
+            // The refresh debounces ~150ms; poll until the outline actually
+            // changed or the budget passes (a step may leave it unchanged).
+            for _ in 0..<30 where session.cutOutlines == previous {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            #expect(session.visible.map(\.key) == recordedKeys,
+                    "a Cut slider changed which blue lines are visible")
+            #expect(session.visible.map(\.polyline) == recordedGeometry,
+                    "a Cut slider reshaped a blue line")
+            #expect(session.outlineTargets == recordedHidden,
+                    "a Cut slider changed the coincident-line hiding")
+            outlinesPerStep.append(session.cutOutlines)
+        }
+
+        try await sweep { session.outlineDetail = 0.1 }
+        try await sweep { session.outlineDetail = 1.0 }
+        try await sweep { session.outlineSmoothness = 0.0 }
+        try await sweep { session.outlineSmoothness = 1.0 }
+
+        // The red outline itself did respond to its sliders.
+        #expect(outlinesPerStep[1] != outlinesPerStep[2],
+                "outlineDetail 0.1 vs 1.0 must reshape the cut outline")
+    }
+
+    /// Promotions persist as frozen geometry: save → mutate → restore
+    /// reproduces the exact red polylines, without tap replay.
+    @MainActor
+    @Test(.timeLimit(.minutes(2)))
+    func promotionsSurviveSaveAndRestoreAsFrozenGeometry() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "MaskedTraceTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = try await Self.fishSession(root: root)
+        let item = try #require(session.visible.first(where: { $0.polyline.points.count > 1 }))
+        let mid = item.polyline.points[item.polyline.points.count / 2]
+
+        session.toggleCut(at: mid)
+        let recorded = session.promotedCuts
+        try #require(recorded.count == 1)
+        try session.saveVersion()
+
+        // Demote and wander the engrave slider — the restore must bring the
+        // exact frozen geometry back regardless.
+        session.toggleCut(at: mid)
+        #expect(session.promotedCuts.isEmpty)
+        session.smoothness = 0.9
+        for _ in 0..<600 where session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+
+        let version = try #require(session.project.traceVersions.last)
+        session.restore(version)
+        for _ in 0..<600 where session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(session.promotedCuts == recorded, "restore must reproduce the frozen promotion exactly")
+    }
+
+    /// Legacy saved versions carried cut TAPS, not geometry: restoring one
+    /// converts each surviving tap into a frozen promotion against the
+    /// restored trace, once.
+    @MainActor
+    @Test(.timeLimit(.minutes(2)))
+    func legacyCutTapSnapshotConvertsToFrozenPromotionOnRestore() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "MaskedTraceTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let session = try await Self.fishSession(root: root)
+        let item = try #require(session.visible.first(where: { $0.polyline.points.count > 1 }))
+        let mid = item.polyline.points[item.polyline.points.count / 2]
+
+        // Hand-crafted legacy snapshot: detail + a cut tap at a known line's
+        // midpoint (eraseTaps was non-optional in the legacy schema too).
+        let legacyJSON = """
+        {"detail": \(session.detail), "eraseTaps": [], "cutTaps": [[\(mid.x), \(mid.y)]]}
+        """
+        let store = ProjectStore(rootURL: root)
+        let version = try store.addTraceVersion(
+            to: session.project, detail: session.detail,
+            pathsData: Data(legacyJSON.utf8))
+
+        #expect(session.promotedCuts.isEmpty)
+        session.restore(version)
+        for _ in 0..<600 where session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(session.promotedCuts.count == 1,
+                "a legacy cut tap must materialize as one frozen promotion")
+        #expect(session.promotedCuts.first == item.polyline)
+
+        // One-time conversion, not replay: another re-trace keeps the
+        // promotion frozen, untouched.
+        let recorded = session.promotedCuts
+        session.smoothness = 0.9
+        for _ in 0..<600 where session.isTracing {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(session.promotedCuts == recorded)
     }
 }

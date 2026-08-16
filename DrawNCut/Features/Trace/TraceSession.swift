@@ -17,13 +17,23 @@ struct TraceSnapshot: Codable {
     var outlineDetail: Double? = nil
     var outlineSmoothness: Double? = nil
     var smoothness: Double? = nil
-    /// Cut-promotion taps as [x, y], in tap order.
+    /// Legacy format: cut-promotion taps as [x, y], in tap order. Still
+    /// decoded — each surviving tap converts into a frozen promotion once,
+    /// against the restored trace.
     var cutTaps: [[Double]]? = nil
+    /// Frozen tap-promoted cut lines: exact geometry, no tap replay.
+    var promotedCuts: [SnapshotPolyline]? = nil
     /// Frozen point-edited geometry, when the user reshaped the trace.
     var editedPaths: [SnapshotEditedPath]? = nil
     /// True once frozen geometry also carries the cut outline (older
     /// versions saved traced paths only).
     var editedPathsIncludeOutlines: Bool? = nil
+}
+
+/// One frozen polyline as saved in a version: raw points plus closure.
+struct SnapshotPolyline: Codable {
+    var points: [[Double]]
+    var isClosed: Bool
 }
 
 /// One point-edited path as saved in a version: raw points, closure, role.
@@ -66,18 +76,29 @@ final class TraceSession {
     /// mask; the outline comes from segmentation or not at all. Not
     /// erasable: they are the piece's edges.
     private(set) var cutOutlines: [Polyline] = []
+    /// The mask silhouette at FIXED fidelity, computed once per mask load —
+    /// the slider-independent reference for deciding which traced lines just
+    /// re-draw the cut. Moving the Cut sliders reshapes `cutOutlines` only;
+    /// it must never flicker blue lines in and out.
+    private var referenceOutlines: [Polyline] = []
     private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
     /// Traced polylines that just re-draw the cut outline (the figure's own
     /// silhouette stroke). The laser already cuts there; engraving them too
     /// would double-burn the piece's edge, so they are hidden from output.
     private(set) var outlineTargets: Set<TargetKey> = []
-    /// Engrave lines the user tapped to promote into cut lines. Derived from
-    /// `cutTaps` after every re-trace.
-    private(set) var cutTargets: Set<TargetKey> = []
-    /// Every cut-toggle tap, in image space, in order. Replay order matters:
-    /// tapping a line twice nets back to engrave.
-    private(set) var cutTaps: [SIMD2<Double>] = []
+    /// Cut lines the user promoted by tapping engrave lines: FROZEN copies,
+    /// owned by the cut world like the outline. Re-tracing (engrave sliders)
+    /// never reshapes them; the traced source line underneath stays hidden
+    /// via `promotedSourceTargets`.
+    private(set) var promotedCuts: [Polyline] = []
+    /// Traced polylines hidden because a frozen promotion covers them —
+    /// recomputed against `promotedCuts` after every re-trace (keys change),
+    /// and immediately on promote/demote.
+    private var promotedSourceTargets: Set<TargetKey> = []
+    /// Legacy cut taps from an old saved version, converted into frozen
+    /// promotions exactly once, when the restore's re-trace lands.
+    private var pendingLegacyCutTaps: [SIMD2<Double>]?
     /// Frozen, user-editable geometry (nil while the trace is live). Once
     /// set, it is the source of truth for rendering and export; a re-trace
     /// discards it — point surgery is the last step, after the sliders.
@@ -85,6 +106,13 @@ final class TraceSession {
     /// Edits restored from a saved version, applied when the restore's own
     /// re-trace finishes (which would otherwise clear them).
     private var pendingRestoredEdits: [EditablePath]?
+    /// Undo for frozen-geometry gestures (a point drag, a join, one brush
+    /// stroke): each completed gesture that changed anything pushes the
+    /// prior state; one undo pops one gesture. Cleared on re-trace.
+    private(set) var editUndoStack: [[EditablePath]] = []
+    /// Set at gesture start, promoted to the stack on the gesture's first
+    /// actual mutation — a drag that grabs nothing never records an undo.
+    private var pendingUndoSnapshot: [EditablePath]?
     private(set) var isTracing = false
     private(set) var suggestionsApplied = false
 
@@ -168,12 +196,13 @@ final class TraceSession {
             mask = nil
             snapInk = nil
             cutOutlines = []
+            referenceOutlines = []
             return
         }
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
         let detail = outlineDetail
         let smoothness = outlineSmoothness
-        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, BinaryBitmap?, [Polyline])? in
+        let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, BinaryBitmap?, [Polyline], [Polyline])? in
             guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
             // The cut runs exactly on the subject's silhouette — the mask
             // boundary IS the figure's edge (the deer's outline). Raster
@@ -181,11 +210,20 @@ final class TraceSession {
             // segmenter's edge strays off the pen line, snapping pulls the
             // cut back onto the drawing's own stroke.
             let ink = BinaryBitmap(cgImage: cgImage)
-            return (bitmap, ink, Self.outlines(of: bitmap, snappedTo: ink, detail: detail, smoothness: smoothness))
+            let displayed = Self.outlines(
+                of: bitmap, snappedTo: ink, detail: detail, smoothness: smoothness)
+            // The fixed-fidelity reference for coincident-line hiding: the
+            // Cut sliders never touch it, so which blue lines the outline
+            // makes redundant is invariant under them.
+            let reference = Self.outlines(
+                of: bitmap, snappedTo: ink,
+                detail: 0.7, smoothness: TraceParameters.defaultSmoothness)
+            return (bitmap, ink, displayed, reference)
         }.value
         mask = loaded?.0
         snapInk = loaded?.1
         cutOutlines = loaded?.2 ?? []
+        referenceOutlines = loaded?.3 ?? []
         TraceLog.log(
             "mask \(loaded == nil ? "FAILED to load" : "loaded"), \(cutOutlines.count) cut loop(s), \(cutOutlines.reduce(0) { $0 + $1.points.count }) points",
             file: diagnosticsURL
@@ -211,7 +249,7 @@ final class TraceSession {
         let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
-        let outlines = cutOutlines
+        let outlines = referenceOutlines
         isTracing = true
         retraceTask = Task { [weak self] in
             if debounce {
@@ -245,11 +283,24 @@ final class TraceSession {
             // otherwise hide freshly traced neighbors.
             self.removedTargets = []
             self.outlineTargets = coincident
-            self.reapplyCutTaps()
+            // Frozen promotions survive untouched; only the hidden traced
+            // twins are re-derived against the fresh keys.
+            self.refreshPromotedSourceTargets()
+            // Legacy saved versions stored taps, not geometry: convert each
+            // surviving tap into a frozen promotion once, right here against
+            // the restored trace.
+            if let taps = self.pendingLegacyCutTaps {
+                self.pendingLegacyCutTaps = nil
+                for tap in taps { self.toggleCut(at: tap) }
+            }
             // A fresh trace supersedes point surgery — except when this trace
             // was triggered by a version restore carrying its own edits.
             self.editedPaths = self.pendingRestoredEdits
             self.pendingRestoredEdits = nil
+            // The undo stack narrates one frozen-geometry session; a re-trace
+            // starts a new one — undo must never resurrect stale geometry.
+            self.editUndoStack = []
+            self.pendingUndoSnapshot = nil
             self.logTraceOutcome(traced, suggestionCount: byTarget.count)
             // Text regions may have landed while this trace was running.
             if self.textRegions != regions {
@@ -284,30 +335,24 @@ final class TraceSession {
         )
     }
 
-    /// Recomputes the cut outline (and which traced lines it makes
-    /// redundant) when a Cut slider moves.
+    /// Recomputes the cut outline when a Cut slider moves. ONLY the red
+    /// outline: which blue lines it hides (`outlineTargets`) is derived from
+    /// the fixed-fidelity `referenceOutlines`, so the Cut sliders can never
+    /// flicker engrave lines or promotions.
     private func scheduleOutlineRefresh() {
         guard let mask else { return }
         outlineTask?.cancel()
         let detail = outlineDetail
         let smoothness = outlineSmoothness
-        let result = result
         let ink = snapInk
         outlineTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
-            let computed = await Task.detached(priority: .userInitiated) { () -> ([Polyline], Set<TargetKey>) in
-                let outlines = Self.outlines(of: mask, snappedTo: ink, detail: detail, smoothness: smoothness)
-                var coincident: Set<TargetKey> = []
-                if let result {
-                    coincident = Self.coincidentTargets(in: result, outlines: outlines)
-                }
-                return (outlines, coincident)
+            let outlines = await Task.detached(priority: .userInitiated) {
+                Self.outlines(of: mask, snappedTo: ink, detail: detail, smoothness: smoothness)
             }.value
             guard !Task.isCancelled, let self else { return }
-            self.cutOutlines = computed.0
-            self.outlineTargets = computed.1
-            self.reapplyCutTaps()
+            self.cutOutlines = outlines
         }
     }
 
@@ -391,34 +436,69 @@ final class TraceSession {
     // MARK: - Cut promotion
 
     /// Toggles the tapped engrave line between engrave (blue) and cut (red).
-    /// Taps are recorded in image space and replayed after every re-trace,
-    /// so promotions survive Detail/Smoothness changes — the same pattern
-    /// erasures use.
+    /// Promotion FREEZES: the tapped polyline's current geometry is copied
+    /// into `promotedCuts` — owned by the cut world from then on, immune to
+    /// the Engrave sliders — and its traced source hides. Tapping the frozen
+    /// red line again demotes it: the copy is dropped and the source shows.
     func toggleCut(at point: SIMD2<Double>) {
-        guard let key = target(near: point) else { return }
-        cutTaps.append(point)
-        if cutTargets.contains(key) {
-            cutTargets.remove(key)
-        } else {
-            cutTargets.insert(key)
+        let promoted = nearestPromotedCut(to: point)
+        let traced = nearestVisibleTarget(to: point)
+        switch (promoted, traced) {
+        case let (.some(p), .some(t)):
+            if p.distance <= t.distance { demote(at: p.index) } else { promote(t.key) }
+        case let (.some(p), nil):
+            demote(at: p.index)
+        case let (nil, .some(t)):
+            promote(t.key)
+        case (nil, nil):
+            break
         }
     }
 
-    /// Replays every recorded cut tap against the current trace result. A
-    /// tap whose line no longer exists (erased, or dropped at a coarser
-    /// Detail) hits nothing and is skipped for that trace; it applies again
-    /// when the line comes back.
-    private func reapplyCutTaps() {
-        var toggled: Set<TargetKey> = []
-        for tap in cutTaps {
-            guard let key = target(near: tap) else { continue }
-            if toggled.contains(key) {
-                toggled.remove(key)
-            } else {
-                toggled.insert(key)
+    private func promote(_ key: TargetKey) {
+        guard let result,
+              result.elements.indices.contains(key.elementIndex),
+              result.elements[key.elementIndex].polylines.indices.contains(key.polylineIndex)
+        else { return }
+        promotedCuts.append(result.elements[key.elementIndex].polylines[key.polylineIndex])
+        promotedSourceTargets.insert(key)
+    }
+
+    private func demote(at index: Int) {
+        promotedCuts.remove(at: index)
+        refreshPromotedSourceTargets()
+    }
+
+    /// Re-derives which traced lines the frozen promotions cover (and hide):
+    /// after a re-trace the keys are new, and after a demotion the remaining
+    /// promotions decide what stays hidden.
+    private func refreshPromotedSourceTargets() {
+        guard let result, !promotedCuts.isEmpty else {
+            promotedSourceTargets = []
+            return
+        }
+        promotedSourceTargets = Self.coincidentTargets(in: result, outlines: promotedCuts)
+    }
+
+    /// The frozen promoted line nearest a tap, within the same thumb radius
+    /// hit-testing uses for traced lines — demotion must find frozen copies,
+    /// whose sources are hidden.
+    private func nearestPromotedCut(to point: SIMD2<Double>) -> (index: Int, distance: Double)? {
+        guard let result else { return nil }
+        let threshold = 0.025 * hypot(result.imageSize.width, result.imageSize.height)
+        var best: (Int, Double)?
+        for (index, polyline) in promotedCuts.enumerated() {
+            var points = polyline.points
+            if polyline.isClosed, let first = points.first { points.append(first) }
+            guard points.count > 1 else { continue }
+            for i in 0..<(points.count - 1) {
+                let d = PathGeometry.distanceToSegment(point, points[i], points[i + 1])
+                if d < (best?.1 ?? threshold) {
+                    best = (index, d)
+                }
             }
         }
-        cutTargets = toggled
+        return best.map { (index: $0.0, distance: $0.1) }
     }
 
     // MARK: - Point editing
@@ -436,11 +516,59 @@ final class TraceSession {
     /// are), so slider-derived outlines can't double up.
     func beginPointEditing() {
         guard editedPaths == nil else { return }
+        // Promoted sources are hidden from `visible`, so everything visible
+        // engraves; the frozen promotions come along as cut paths.
         editedPaths = visible.map {
-            EditablePath(polyline: $0.polyline, isCut: cutTargets.contains($0.key))
+            EditablePath(polyline: $0.polyline, isCut: false)
+        } + promotedCuts.map {
+            EditablePath(polyline: $0, isCut: true)
         } + cutOutlines.map {
             EditablePath(polyline: $0, isCut: true)
         }
+    }
+
+    // MARK: - Edit gestures & undo
+
+    /// Marks a finger-down on the frozen geometry: everything the gesture
+    /// mutates until `endEditGesture` coalesces into ONE undo entry, pushed
+    /// on the gesture's first actual change. A gesture that changes nothing
+    /// (a marker stroke through empty space, a drag that grabbed no point)
+    /// records nothing.
+    func beginEditGesture() {
+        pendingUndoSnapshot = editedPaths
+    }
+
+    /// Marks the finger-up. A snapshot never promoted (no mutation happened)
+    /// is discarded.
+    func endEditGesture() {
+        pendingUndoSnapshot = nil
+    }
+
+    /// Applies a mutation to the frozen geometry, recording the gesture's
+    /// pre-state on its first actual change.
+    private func applyEdit(_ newPaths: [EditablePath], previous: [EditablePath]) {
+        guard newPaths != previous else { return }
+        if let snapshot = pendingUndoSnapshot {
+            editUndoStack.append(snapshot)
+            pendingUndoSnapshot = nil
+        }
+        editedPaths = newPaths
+    }
+
+    /// True when the undo button should be enabled: an edit gesture or an
+    /// erasure is there to take back.
+    var canUndo: Bool {
+        (editedPaths != nil && !editUndoStack.isEmpty) || !eraseShapes.isEmpty
+    }
+
+    /// The one user-facing undo: pops the most recent edit gesture while
+    /// frozen geometry exists, otherwise falls back to erase undo.
+    func undo() {
+        if editedPaths != nil, let previous = editUndoStack.popLast() {
+            editedPaths = previous
+            return
+        }
+        undoErase()
     }
 
     /// Locally smooths every path span within `radius` of the swept marker
@@ -450,7 +578,7 @@ final class TraceSession {
     func brushSmooth(from previous: SIMD2<Double>?, to point: SIMD2<Double>, radius: Double) {
         guard let paths = editedPaths else { return }
         let stroke = previous.map { [$0, point] } ?? [point]
-        editedPaths = Self.brushSmoothed(paths, stroke: stroke, radius: radius)
+        applyEdit(Self.brushSmoothed(paths, stroke: stroke, radius: radius), previous: paths)
     }
 
     nonisolated static func brushSmoothed(
@@ -607,29 +735,35 @@ final class TraceSession {
     }
 
     func movePoint(_ ref: PointRef, to location: SIMD2<Double>) {
-        guard var paths = editedPaths, paths.indices.contains(ref.path),
-              paths[ref.path].polyline.points.indices.contains(ref.point) else { return }
+        guard let previous = editedPaths, previous.indices.contains(ref.path),
+              previous[ref.path].polyline.points.indices.contains(ref.point) else { return }
+        var paths = previous
         paths[ref.path].polyline.points[ref.point] = location
-        editedPaths = paths
+        applyEdit(paths, previous: previous)
     }
 
     /// Completes a drag; without a snap target the drag was just a move.
     func endPointDrag(_ dragged: PointRef, snappedTo target: PointRef?) {
         guard let target, let paths = editedPaths else { return }
-        editedPaths = Self.joining(paths, dragged: dragged, target: target)
+        applyEdit(Self.joining(paths, dragged: dragged, target: target), previous: paths)
     }
 
     // MARK: - Erasing
 
     /// The visible polyline nearest a tap, within a forgiving thumb radius.
     func target(near point: SIMD2<Double>) -> TargetKey? {
+        nearestVisibleTarget(to: point)?.key
+    }
+
+    private func nearestVisibleTarget(to point: SIMD2<Double>) -> (key: TargetKey, distance: Double)? {
         guard let result else { return nil }
         let threshold = 0.025 * hypot(result.imageSize.width, result.imageSize.height)
         var best: (TargetKey, Double)?
         for (e, element) in result.elements.enumerated() {
             for (p, polyline) in element.polylines.enumerated() {
                 let key = TargetKey(elementIndex: e, polylineIndex: p)
-                guard !removedTargets.contains(key), !outlineTargets.contains(key) else { continue }
+                guard !removedTargets.contains(key), !outlineTargets.contains(key),
+                      !promotedSourceTargets.contains(key) else { continue }
                 var points = polyline.points
                 if polyline.isClosed, let first = points.first { points.append(first) }
                 guard points.count > 1 else { continue }
@@ -641,7 +775,7 @@ final class TraceSession {
                 }
             }
         }
-        return best?.0
+        return best.map { (key: $0.0, distance: $0.1) }
     }
 
     /// Fingertip-sized eraser radius in image pixels at 1× zoom.
@@ -768,7 +902,13 @@ final class TraceSession {
         let snapshot = TraceSnapshot(
             detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail,
             outlineSmoothness: outlineSmoothness,
-            smoothness: smoothness, cutTaps: cutTaps.map { [$0.x, $0.y] },
+            smoothness: smoothness,
+            promotedCuts: promotedCuts.map { polyline in
+                SnapshotPolyline(
+                    points: polyline.points.map { [$0.x, $0.y] },
+                    isClosed: polyline.isClosed
+                )
+            },
             editedPaths: editedPaths.map { paths in
                 paths.map { path in
                     SnapshotEditedPath(
@@ -810,9 +950,26 @@ final class TraceSession {
         // what is now its default. Setting these may each schedule a retrace,
         // but scheduling cancels the previous task, so only one trace runs.
         smoothness = snapshot.smoothness ?? TraceParameters.defaultSmoothness
-        cutTaps = (snapshot.cutTaps ?? []).compactMap { values in
-            values.count >= 2 ? SIMD2(values[0], values[1]) : nil
+        if let frozen = snapshot.promotedCuts {
+            // Frozen promotions restore as exact geometry — no tap replay.
+            promotedCuts = frozen.compactMap { saved in
+                let points = saved.points.compactMap { values -> SIMD2<Double>? in
+                    values.count >= 2 ? SIMD2(values[0], values[1]) : nil
+                }
+                guard points.count >= 2 else { return nil }
+                return Polyline(points: points, isClosed: saved.isClosed)
+            }
+            pendingLegacyCutTaps = nil
+        } else {
+            // Legacy snapshots stored taps: convert each into a frozen
+            // promotion once, after the restore-triggered re-trace lands.
+            promotedCuts = []
+            let taps = (snapshot.cutTaps ?? []).compactMap { values -> SIMD2<Double>? in
+                values.count >= 2 ? SIMD2(values[0], values[1]) : nil
+            }
+            pendingLegacyCutTaps = taps.isEmpty ? nil : taps
         }
+        refreshPromotedSourceTargets()
         // Applied after the restore-triggered re-trace lands.
         pendingRestoredEdits = snapshot.editedPaths.map { paths in
             paths.compactMap { path in
@@ -854,7 +1011,8 @@ final class TraceSession {
         for (e, element) in result.elements.enumerated() {
             for (p, polyline) in element.polylines.enumerated() {
                 let key = TargetKey(elementIndex: e, polylineIndex: p)
-                guard !removedTargets.contains(key), !outlineTargets.contains(key) else { continue }
+                guard !removedTargets.contains(key), !outlineTargets.contains(key),
+                      !promotedSourceTargets.contains(key) else { continue }
                 output.append((key, polyline, suggestionsByTarget[key]))
             }
         }
@@ -872,16 +1030,17 @@ final class TraceSession {
     /// CUT layer; everything else traced engraves.
     func exportDXF(widthMM: Double) throws -> URL {
         let engrave: [Polyline]
-        let promoted: [Polyline]
         let cuts: [Polyline]
         if let editedPaths {
-            // Frozen geometry already contains the cut outline.
+            // Frozen geometry already contains the cut outline and any
+            // promotions (they froze in as isCut paths).
             engrave = editedPaths.filter { !$0.isCut }.map(\.polyline)
             cuts = editedPaths.filter(\.isCut).map(\.polyline)
         } else {
-            engrave = visible.filter { !cutTargets.contains($0.key) }.map(\.polyline)
-            promoted = visible.filter { cutTargets.contains($0.key) }.map(\.polyline)
-            cuts = cutOutlines + promoted
+            // Promoted sources are hidden from `visible`; the frozen copies
+            // cut instead.
+            engrave = visible.map(\.polyline)
+            cuts = cutOutlines + promotedCuts
         }
         let dxf = DXFExportBuilder.dxf(
             from: engrave, cutOutlines: cuts, widthMM: widthMM)
