@@ -18,6 +18,23 @@ struct TraceSnapshot: Codable {
     var smoothness: Double? = nil
     /// Cut-promotion taps as [x, y], in tap order.
     var cutTaps: [[Double]]? = nil
+    /// Frozen point-edited geometry, when the user reshaped the trace.
+    var editedPaths: [SnapshotEditedPath]? = nil
+}
+
+/// One point-edited path as saved in a version: raw points, closure, role.
+struct SnapshotEditedPath: Codable {
+    var points: [[Double]]
+    var isClosed: Bool
+    var isCut: Bool
+}
+
+/// One path in point-edit space: geometry frozen from the live trace the
+/// moment editing starts. From then on this is what renders and exports,
+/// until a re-trace (slider or eraser change) resets it.
+struct EditablePath: Equatable {
+    var polyline: Polyline
+    var isCut: Bool
 }
 
 /// Drives the trace screen: owns the image, re-traces when Detail changes,
@@ -57,6 +74,13 @@ final class TraceSession {
     /// Every cut-toggle tap, in image space, in order. Replay order matters:
     /// tapping a line twice nets back to engrave.
     private(set) var cutTaps: [SIMD2<Double>] = []
+    /// Frozen, user-editable geometry (nil while the trace is live). Once
+    /// set, it is the source of truth for rendering and export; a re-trace
+    /// discards it — point surgery is the last step, after the sliders.
+    private(set) var editedPaths: [EditablePath]?
+    /// Edits restored from a saved version, applied when the restore's own
+    /// re-trace finishes (which would otherwise clear them).
+    private var pendingRestoredEdits: [EditablePath]?
     private(set) var isTracing = false
     private(set) var suggestionsApplied = false
 
@@ -208,6 +232,10 @@ final class TraceSession {
             self.removedTargets = []
             self.outlineTargets = coincident
             self.reapplyCutTaps()
+            // A fresh trace supersedes point surgery — except when this trace
+            // was triggered by a version restore carrying its own edits.
+            self.editedPaths = self.pendingRestoredEdits
+            self.pendingRestoredEdits = nil
             self.logTraceOutcome(traced, suggestionCount: byTarget.count)
             // Text regions may have landed while this trace was running.
             if self.textRegions != regions {
@@ -372,6 +400,128 @@ final class TraceSession {
         cutTargets = toggled
     }
 
+    // MARK: - Point editing
+
+    /// One control point of one edited path.
+    struct PointRef: Equatable {
+        var path: Int
+        var point: Int
+    }
+
+    /// Freezes the current trace (with its cut promotions) into editable
+    /// geometry. No-op when already editing.
+    func beginPointEditing() {
+        guard editedPaths == nil else { return }
+        editedPaths = visible.map {
+            EditablePath(polyline: $0.polyline, isCut: cutTargets.contains($0.key))
+        }
+    }
+
+    func position(of ref: PointRef) -> SIMD2<Double>? {
+        guard let paths = editedPaths, paths.indices.contains(ref.path),
+              paths[ref.path].polyline.points.indices.contains(ref.point) else { return nil }
+        return paths[ref.path].polyline.points[ref.point]
+    }
+
+    /// The control point nearest a touch, within `radius`.
+    func editablePoint(near location: SIMD2<Double>, radius: Double) -> PointRef? {
+        guard let paths = editedPaths else { return nil }
+        var best: (PointRef, Double)?
+        for (pathIndex, path) in paths.enumerated() {
+            for (pointIndex, point) in path.polyline.points.enumerated() {
+                let d = simd_length(point - location)
+                if d <= radius, d < (best?.1 ?? .infinity) {
+                    best = (PointRef(path: pathIndex, point: pointIndex), d)
+                }
+            }
+        }
+        return best?.0
+    }
+
+    nonisolated static func isEndpoint(_ ref: PointRef, in paths: [EditablePath]) -> Bool {
+        guard paths.indices.contains(ref.path) else { return false }
+        let polyline = paths[ref.path].polyline
+        return !polyline.isClosed && (ref.point == 0 || ref.point == polyline.points.count - 1)
+    }
+
+    /// The endpoint another OPEN path (or this path's other end) offers for
+    /// joining, within `radius` of the dragged position. Only endpoints are
+    /// magnetic: joins happen end-to-end, and that's what closes shapes.
+    nonisolated static func snapTarget(
+        in paths: [EditablePath], for dragged: PointRef,
+        near location: SIMD2<Double>, radius: Double
+    ) -> PointRef? {
+        guard isEndpoint(dragged, in: paths) else { return nil }
+        var best: (PointRef, Double)?
+        for (pathIndex, path) in paths.enumerated() where !path.polyline.isClosed {
+            let lastIndex = path.polyline.points.count - 1
+            for pointIndex in Set([0, lastIndex]) {
+                let candidate = PointRef(path: pathIndex, point: pointIndex)
+                if candidate == dragged { continue }
+                // A 2-point path's other end is adjacent; joining it to the
+                // dragged end would collapse the path. Skip.
+                if pathIndex == dragged.path && lastIndex < 2 { continue }
+                let d = simd_length(paths[pathIndex].polyline.points[pointIndex] - location)
+                if d <= radius, d < (best?.1 ?? .infinity) {
+                    best = (candidate, d)
+                }
+            }
+        }
+        return best?.0
+    }
+
+    /// Joins two endpoints: the same path's other end closes the shape;
+    /// another path's end merges the two into one (cut wins over engrave —
+    /// joins exist to build cut loops).
+    nonisolated static func joining(
+        _ paths: [EditablePath], dragged: PointRef, target: PointRef
+    ) -> [EditablePath] {
+        guard isEndpoint(dragged, in: paths), isEndpoint(target, in: paths) else { return paths }
+        var paths = paths
+        if target.path == dragged.path {
+            // The dragged duplicate sits on the other end; closing supplies
+            // that segment.
+            var polyline = paths[dragged.path].polyline
+            if dragged.point == 0 {
+                polyline.points.removeFirst()
+            } else {
+                polyline.points.removeLast()
+            }
+            polyline.isClosed = true
+            paths[dragged.path].polyline = polyline
+        } else {
+            var head = paths[dragged.path].polyline.points
+            var tail = paths[target.path].polyline.points
+            if dragged.point == 0 { head.reverse() }          // dragged end last
+            if target.point != 0 { tail.reverse() }           // snapped end first
+            let merged = Polyline(points: head.dropLast() + tail, isClosed: false)
+            let isCut = paths[dragged.path].isCut || paths[target.path].isCut
+            let keep = min(dragged.path, target.path)
+            let drop = max(dragged.path, target.path)
+            paths[keep] = EditablePath(polyline: merged, isCut: isCut)
+            paths.remove(at: drop)
+        }
+        return paths
+    }
+
+    func snapTarget(for dragged: PointRef, near location: SIMD2<Double>, radius: Double) -> PointRef? {
+        guard let paths = editedPaths else { return nil }
+        return Self.snapTarget(in: paths, for: dragged, near: location, radius: radius)
+    }
+
+    func movePoint(_ ref: PointRef, to location: SIMD2<Double>) {
+        guard var paths = editedPaths, paths.indices.contains(ref.path),
+              paths[ref.path].polyline.points.indices.contains(ref.point) else { return }
+        paths[ref.path].polyline.points[ref.point] = location
+        editedPaths = paths
+    }
+
+    /// Completes a drag; without a snap target the drag was just a move.
+    func endPointDrag(_ dragged: PointRef, snappedTo target: PointRef?) {
+        guard let target, let paths = editedPaths else { return }
+        editedPaths = Self.joining(paths, dragged: dragged, target: target)
+    }
+
     // MARK: - Erasing
 
     /// The visible polyline nearest a tap, within a forgiving thumb radius.
@@ -512,7 +662,16 @@ final class TraceSession {
     func saveVersion() throws {
         let snapshot = TraceSnapshot(
             detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail,
-            smoothness: smoothness, cutTaps: cutTaps.map { [$0.x, $0.y] })
+            smoothness: smoothness, cutTaps: cutTaps.map { [$0.x, $0.y] },
+            editedPaths: editedPaths.map { paths in
+                paths.map { path in
+                    SnapshotEditedPath(
+                        points: path.polyline.points.map { [$0.x, $0.y] },
+                        isClosed: path.polyline.isClosed,
+                        isCut: path.isCut
+                    )
+                }
+            })
         let data = try JSONEncoder().encode(snapshot)
         _ = try store.addTraceVersion(to: project, detail: detail, pathsData: data)
         syncProject()
@@ -544,6 +703,19 @@ final class TraceSession {
         smoothness = snapshot.smoothness ?? TraceParameters.defaultSmoothness
         cutTaps = (snapshot.cutTaps ?? []).compactMap { values in
             values.count >= 2 ? SIMD2(values[0], values[1]) : nil
+        }
+        // Applied after the restore-triggered re-trace lands.
+        pendingRestoredEdits = snapshot.editedPaths.map { paths in
+            paths.compactMap { path in
+                let points = path.points.compactMap { values -> SIMD2<Double>? in
+                    values.count >= 2 ? SIMD2(values[0], values[1]) : nil
+                }
+                guard points.count >= 2 else { return nil }
+                return EditablePath(
+                    polyline: Polyline(points: points, isClosed: path.isClosed),
+                    isCut: path.isCut
+                )
+            }
         }
         if detail == snapshot.detail {
             scheduleRetrace(debounce: false)
@@ -584,8 +756,15 @@ final class TraceSession {
     /// the file URL. The cut outline and any tap-promoted lines land on the
     /// CUT layer; everything else traced engraves.
     func exportDXF(widthMM: Double) throws -> URL {
-        let engrave = visible.filter { !cutTargets.contains($0.key) }.map(\.polyline)
-        let promoted = visible.filter { cutTargets.contains($0.key) }.map(\.polyline)
+        let engrave: [Polyline]
+        let promoted: [Polyline]
+        if let editedPaths {
+            engrave = editedPaths.filter { !$0.isCut }.map(\.polyline)
+            promoted = editedPaths.filter(\.isCut).map(\.polyline)
+        } else {
+            engrave = visible.filter { !cutTargets.contains($0.key) }.map(\.polyline)
+            promoted = visible.filter { cutTargets.contains($0.key) }.map(\.polyline)
+        }
         let dxf = DXFExportBuilder.dxf(
             from: engrave, cutOutlines: cutOutlines + promoted, widthMM: widthMM)
         let directory = store.exportsDirectory(for: project)

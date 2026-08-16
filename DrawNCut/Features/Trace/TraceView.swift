@@ -13,6 +13,7 @@ struct TraceView: View {
     @State private var showExport = false
     @State private var saveConfirmation = false
     @State private var eraserMode = false
+    @State private var pointEditMode = false
 
     var body: some View {
         Group {
@@ -42,10 +43,10 @@ struct TraceView: View {
     @ViewBuilder
     private func content(_ session: TraceSession) -> some View {
         VStack(spacing: 0) {
-            TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode)
+            TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode, pointEditMode: pointEditMode)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay(alignment: .top) {
-                    if session.pendingSuggestionCount > 0 && !session.suggestionsApplied {
+                    if session.pendingSuggestionCount > 0 && !session.suggestionsApplied && !pointEditMode {
                         suggestionBanner(session)
                     }
                 }
@@ -88,39 +89,58 @@ struct TraceView: View {
     private func controls(_ session: TraceSession) -> some View {
         @Bindable var session = session
         return VStack(spacing: 10) {
-            // The red cut outline: how faithfully it follows the mask.
-            if session.hasSubjectMask {
+            // Sliders re-derive geometry from the photo, which would discard
+            // point surgery — so they sleep while points are being edited.
+            Group {
+                // The red cut outline: how faithfully it follows the mask.
+                if session.hasSubjectMask {
+                    HStack {
+                        Text("Outline")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .frame(width: 52, alignment: .leading)
+                        Slider(value: $session.outlineDetail, in: 0...1)
+                            .tint(.red)
+                    }
+                }
+                // The blue engrave lines: Detail decides which marks survive…
                 HStack {
-                    Text("Outline")
+                    Text("Lines")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.blue)
                         .frame(width: 52, alignment: .leading)
-                    Slider(value: $session.outlineDetail, in: 0...1)
-                        .tint(.red)
+                    Slider(value: $session.detail, in: 0...1)
+                        .tint(.blue)
+                }
+                // …and Smooth decides how they are drawn: left keeps every
+                // corner the raster had (jagged), right rounds everything.
+                HStack {
+                    Text("Smooth")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                        .frame(width: 52, alignment: .leading)
+                    Slider(value: $session.smoothness, in: 0...1)
+                        .tint(.blue.opacity(0.55))
                 }
             }
-            // The blue engrave lines: Detail decides which marks survive…
-            HStack {
-                Text("Lines")
-                    .font(.caption)
-                    .foregroundStyle(.blue)
-                    .frame(width: 52, alignment: .leading)
-                Slider(value: $session.detail, in: 0...1)
-                    .tint(.blue)
-            }
-            // …and Smooth decides how they are drawn: left keeps every
-            // corner the raster had (jagged), right rounds everything.
-            HStack {
-                Text("Smooth")
-                    .font(.caption)
-                    .foregroundStyle(.blue)
-                    .frame(width: 52, alignment: .leading)
-                Slider(value: $session.smoothness, in: 0...1)
-                    .tint(.blue.opacity(0.55))
-            }
+            .disabled(pointEditMode)
+            .opacity(pointEditMode ? 0.35 : 1)
             HStack(spacing: 16) {
+                Toggle(isOn: $pointEditMode) {
+                    Text("Points")
+                        .font(.caption)
+                }
+                .toggleStyle(.switch)
+                .fixedSize()
+                .accessibilityIdentifier("pointEditToggle")
+                .onChange(of: pointEditMode) { _, on in
+                    if on {
+                        eraserMode = false
+                        session.beginPointEditing()
+                    }
+                }
                 Spacer()
-                Text(eraserMode ? "Circle around things to erase • two-finger tap undoes" : "")
+                Text(hint)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 Button {
@@ -133,6 +153,7 @@ struct TraceView: View {
                 .accessibilityLabel("Undo erase")
                 Button {
                     eraserMode.toggle()
+                    if eraserMode { pointEditMode = false }
                 } label: {
                     Image(systemName: eraserMode ? "eraser.fill" : "eraser")
                         .font(.title2)
@@ -144,6 +165,16 @@ struct TraceView: View {
         }
         .padding()
         .background(.bar)
+    }
+
+    private var hint: String {
+        if pointEditMode {
+            return "Drag points • drop an endpoint on another to join"
+        }
+        if eraserMode {
+            return "Circle around things to erase • two-finger tap undoes"
+        }
+        return ""
     }
 
     @ToolbarContentBuilder
@@ -227,15 +258,24 @@ private struct TraceCanvas: View {
     let session: TraceSession
     let showPhoto: Bool
     let eraserMode: Bool
+    let pointEditMode: Bool
 
     @State private var zoom: CGFloat = 1
     @State private var panOffset: CGSize = .zero
     /// The in-progress lasso, in view coordinates, while a finger circles
     /// something in eraser mode.
     @State private var lassoViewPoints: [CGPoint] = []
+    /// The control point under the finger, while one is being dragged.
+    @State private var dragRef: TraceSession.PointRef?
+    /// The endpoint the dragged point is currently snapped onto.
+    @State private var snapRef: TraceSession.PointRef?
 
     /// Spot-erase radius as the finger experiences it, regardless of zoom.
     private let eraserViewRadius: CGFloat = 22
+    /// How far a finger can miss a control point and still grab it (view pt).
+    private let pointGrabViewRadius: CGFloat = 24
+    /// Magnetic range for endpoint-to-endpoint snapping (view pt).
+    private let snapViewRadius: CGFloat = 16
 
     var body: some View {
         GeometryReader { geometry in
@@ -259,17 +299,29 @@ private struct TraceCanvas: View {
                     context.draw(Image(decorative: image, scale: 1), in: rect)
                     context.opacity = 1
                 }
-                for item in session.visible {
-                    // Tap-promoted cut lines draw exactly like the cut
-                    // outline; promotion outranks any pending suggestion.
-                    let style = session.cutTargets.contains(item.key)
-                        ? (color: Color.red, emphasized: true)
-                        : color(for: item.suggestion)
-                    context.stroke(
-                        path(for: item.polyline, scale: scale, offset: offset),
-                        with: .color(style.color),
-                        lineWidth: style.emphasized ? 3 : 1.5
-                    )
+                if let edited = session.editedPaths {
+                    // Point-edited geometry replaces the live trace until the
+                    // next re-trace resets it.
+                    for editablePath in edited {
+                        context.stroke(
+                            path(for: editablePath.polyline, scale: scale, offset: offset),
+                            with: .color(editablePath.isCut ? .red : .blue),
+                            lineWidth: editablePath.isCut ? 3 : 1.5
+                        )
+                    }
+                } else {
+                    for item in session.visible {
+                        // Tap-promoted cut lines draw exactly like the cut
+                        // outline; promotion outranks any pending suggestion.
+                        let style = session.cutTargets.contains(item.key)
+                            ? (color: Color.red, emphasized: true)
+                            : color(for: item.suggestion)
+                        context.stroke(
+                            path(for: item.polyline, scale: scale, offset: offset),
+                            with: .color(style.color),
+                            lineWidth: style.emphasized ? 3 : 1.5
+                        )
+                    }
                 }
                 // The CUT loops (piece edges and holes) — drawn last so they
                 // read as the piece's edges. Red like the DXF CUT layer. Not
@@ -292,13 +344,78 @@ private struct TraceCanvas: View {
                         style: StrokeStyle(lineWidth: 2, dash: [6, 4])
                     )
                 }
+                // Control-point handles. Endpoints draw bigger — they're the
+                // joinable ones. Handle size is constant on screen, not in
+                // image space, so zooming in doesn't balloon them.
+                if pointEditMode, let edited = session.editedPaths {
+                    for editablePath in edited {
+                        let polyline = editablePath.polyline
+                        let tint: Color = editablePath.isCut ? .red : .blue
+                        for (index, point) in polyline.points.enumerated() {
+                            let isEndpoint = !polyline.isClosed
+                                && (index == 0 || index == polyline.points.count - 1)
+                            let radius: CGFloat = isEndpoint ? 6 : 3.5
+                            let center = CGPoint(
+                                x: point.x * scale + offset.width,
+                                y: point.y * scale + offset.height
+                            )
+                            let rect = CGRect(
+                                x: center.x - radius, y: center.y - radius,
+                                width: 2 * radius, height: 2 * radius
+                            )
+                            context.fill(Path(ellipseIn: rect), with: .color(.white))
+                            context.stroke(
+                                Path(ellipseIn: rect),
+                                with: .color(tint),
+                                lineWidth: isEndpoint ? 2 : 1.25
+                            )
+                        }
+                    }
+                    // The endpoint the drag is magnetically locked onto.
+                    if let snapRef, let position = session.position(of: snapRef) {
+                        let center = CGPoint(
+                            x: position.x * scale + offset.width,
+                            y: position.y * scale + offset.height
+                        )
+                        let rect = CGRect(x: center.x - 11, y: center.y - 11, width: 22, height: 22)
+                        context.stroke(Path(ellipseIn: rect), with: .color(.green), lineWidth: 3)
+                    }
+                }
             }
             .contentShape(Rectangle())
             .accessibilityElement()
             .accessibilityIdentifier("traceCanvas")
             .accessibilityValue("\(session.visible.count) paths")
             .overlay {
-                TouchOverlay(eraserActive: eraserMode) { previous, current in
+                // One-finger drags are claimed by whichever edit mode is on:
+                // lasso collection for the eraser, point dragging for point
+                // editing. Two-finger pan/pinch stays available in both.
+                TouchOverlay(eraserActive: eraserMode || pointEditMode) { previous, current in
+                    let toImage = { (p: CGPoint) in
+                        SIMD2(
+                            (p.x - offset.width) / scale,
+                            (p.y - offset.height) / scale
+                        )
+                    }
+                    if pointEditMode {
+                        let location = toImage(current)
+                        if previous == nil {
+                            dragRef = session.editablePoint(
+                                near: location, radius: pointGrabViewRadius / scale)
+                            snapRef = nil
+                        }
+                        guard let ref = dragRef else { return }
+                        if let target = session.snapTarget(
+                            for: ref, near: location, radius: snapViewRadius / scale),
+                           let magnet = session.position(of: target) {
+                            snapRef = target
+                            session.movePoint(ref, to: magnet)
+                        } else {
+                            snapRef = nil
+                            session.movePoint(ref, to: location)
+                        }
+                        return
+                    }
                     // Collect the loop; nothing erases until the finger lifts.
                     if previous == nil {
                         lassoViewPoints = [current]
@@ -306,6 +423,14 @@ private struct TraceCanvas: View {
                         lassoViewPoints.append(current)
                     }
                 } onEraseEnd: {
+                    if pointEditMode {
+                        if let ref = dragRef {
+                            session.endPointDrag(ref, snappedTo: snapRef)
+                        }
+                        dragRef = nil
+                        snapRef = nil
+                        return
+                    }
                     let toImage = { (p: CGPoint) in
                         SIMD2(
                             (p.x - offset.width) / scale,
@@ -334,6 +459,8 @@ private struct TraceCanvas: View {
                     session.undoErase()
                 } onSingleTap: { location in
                     // Tap a blue line → cut (red); tap again → engrave (blue).
+                    // While editing points, taps belong to the drag gesture.
+                    guard !pointEditMode else { return }
                     session.toggleCut(at: SIMD2(
                         (location.x - offset.width) / scale,
                         (location.y - offset.height) / scale
