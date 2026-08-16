@@ -16,23 +16,39 @@ struct PointEditTests {
 
     // MARK: - Pure join/snap logic
 
-    @Test func snapFindsNearestForeignEndpointOnly() {
+    @Test func snapReachesEveryPointExceptOwnNeighbors() {
         let paths = [
             open([SIMD2(0, 0), SIMD2(100, 0)]),
             open([SIMD2(110, 2), SIMD2(200, 0), SIMD2(300, 5)]),
         ]
         let dragged = TraceSession.PointRef(path: 0, point: 1)
         // Nearest foreign endpoint within radius.
-        let hit = TraceSession.snapTarget(in: paths, for: dragged, near: SIMD2(104, 0), radius: 12)
-        #expect(hit == TraceSession.PointRef(path: 1, point: 0))
-        // The other path's midpoint is never a target even when closer.
-        let nearMid = TraceSession.snapTarget(in: paths, for: dragged, near: SIMD2(200, 1), radius: 12)
-        #expect(nearMid == nil || nearMid?.point != 1)
+        #expect(TraceSession.snapTarget(in: paths, for: dragged, near: SIMD2(104, 0), radius: 12)
+                == TraceSession.PointRef(path: 1, point: 0))
+        // Foreign INTERIOR points are magnetic too.
+        #expect(TraceSession.snapTarget(in: paths, for: dragged, near: SIMD2(199, 1), radius: 12)
+                == TraceSession.PointRef(path: 1, point: 1))
         // Out of radius: nothing.
         #expect(TraceSession.snapTarget(in: paths, for: dragged, near: SIMD2(150, 40), radius: 12) == nil)
-        // A dragged interior point is not magnetic.
+        // A dragged interior point snaps to other paths' points…
         let interior = TraceSession.PointRef(path: 1, point: 1)
-        #expect(TraceSession.snapTarget(in: paths, for: interior, near: SIMD2(0, 0), radius: 12) == nil)
+        #expect(TraceSession.snapTarget(in: paths, for: interior, near: SIMD2(2, 1), radius: 12)
+                == TraceSession.PointRef(path: 0, point: 0))
+        // …but never to its own immediate neighbors.
+        #expect(TraceSession.snapTarget(in: paths, for: interior, near: SIMD2(298, 5), radius: 12) == nil)
+    }
+
+    @Test func snapOntoAnInteriorPointNeverJoins() {
+        let a = open([SIMD2(0, 0), SIMD2(100, 0)])
+        let b = open([SIMD2(100, 10), SIMD2(200, 10), SIMD2(300, 10)])
+        let joined = TraceSession.joining(
+            [a, b],
+            dragged: TraceSession.PointRef(path: 0, point: 1),
+            target: TraceSession.PointRef(path: 1, point: 1)   // mid-line
+        )
+        #expect(joined.count == 2, "landing on a mid-line point must not merge paths")
+        #expect(joined[0].polyline.points == a.polyline.points)
+        #expect(joined[1].polyline.points == b.polyline.points)
     }
 
     @Test func snapToOwnOtherEndClosesTheShape() {

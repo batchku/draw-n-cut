@@ -444,26 +444,31 @@ final class TraceSession {
         return !polyline.isClosed && (ref.point == 0 || ref.point == polyline.points.count - 1)
     }
 
-    /// The endpoint another OPEN path (or this path's other end) offers for
-    /// joining, within `radius` of the dragged position. Only endpoints are
-    /// magnetic: joins happen end-to-end, and that's what closes shapes.
+    /// The control point the drag can magnetically land on, within `radius`
+    /// of the dragged position. Every point of every path is a target —
+    /// placing a point exactly onto a mid-line vertex matters as much as
+    /// joining ends — except the dragged point's immediate neighbors, which
+    /// would otherwise stick constantly while dragging along its own line.
+    /// Only an endpoint released on an endpoint joins paths (see `joining`).
     nonisolated static func snapTarget(
         in paths: [EditablePath], for dragged: PointRef,
         near location: SIMD2<Double>, radius: Double
     ) -> PointRef? {
-        guard isEndpoint(dragged, in: paths) else { return nil }
+        guard paths.indices.contains(dragged.path) else { return nil }
         var best: (PointRef, Double)?
-        for (pathIndex, path) in paths.enumerated() where !path.polyline.isClosed {
-            let lastIndex = path.polyline.points.count - 1
-            for pointIndex in Set([0, lastIndex]) {
-                let candidate = PointRef(path: pathIndex, point: pointIndex)
-                if candidate == dragged { continue }
-                // A 2-point path's other end is adjacent; joining it to the
-                // dragged end would collapse the path. Skip.
-                if pathIndex == dragged.path && lastIndex < 2 { continue }
-                let d = simd_length(paths[pathIndex].polyline.points[pointIndex] - location)
+        for (pathIndex, path) in paths.enumerated() {
+            let count = path.polyline.points.count
+            for (pointIndex, point) in path.polyline.points.enumerated() {
+                if pathIndex == dragged.path {
+                    // Itself and its neighbors (across the seam on a closed
+                    // path) are never targets.
+                    let gap = abs(pointIndex - dragged.point)
+                    let separation = path.polyline.isClosed ? min(gap, count - gap) : gap
+                    if separation <= 1 { continue }
+                }
+                let d = simd_length(point - location)
                 if d <= radius, d < (best?.1 ?? .infinity) {
-                    best = (candidate, d)
+                    best = (PointRef(path: pathIndex, point: pointIndex), d)
                 }
             }
         }
