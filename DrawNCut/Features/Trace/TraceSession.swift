@@ -15,6 +15,7 @@ struct TraceSnapshot: Codable {
     var eraseTaps: [[Double]] = []
     var eraseShapes: [EraseShape]? = nil
     var outlineDetail: Double? = nil
+    var outlineSmoothness: Double? = nil
     var smoothness: Double? = nil
     /// Cut-promotion taps as [x, y], in tap order.
     var cutTaps: [[Double]]? = nil
@@ -94,9 +95,14 @@ final class TraceSession {
         didSet { if oldValue != smoothness { scheduleRetrace(debounce: true) } }
     }
     /// Fidelity of the cut outline to the mask boundary: 1 follows every
-    /// bump the segmenter saw, 0 is a heavily smoothed silhouette.
+    /// bump the segmenter saw, 0 is a heavily simplified silhouette.
     var outlineDetail: Double = 0.7 {
         didSet { if oldValue != outlineDetail { scheduleOutlineRefresh() } }
+    }
+    /// How the cut outline is drawn: 0 keeps raw corners, 1 rounds hard —
+    /// the cut-side twin of the engrave `smoothness`.
+    var outlineSmoothness: Double = TraceParameters.defaultSmoothness {
+        didSet { if oldValue != outlineSmoothness { scheduleOutlineRefresh() } }
     }
     var hasSubjectMask: Bool { mask != nil }
     /// Every erase gesture, in image space. Rasterized into a mask and
@@ -158,7 +164,8 @@ final class TraceSession {
             return
         }
         let traceSpace = BinaryBitmap.traceSize(for: cgImage)
-        let fidelity = outlineDetail
+        let detail = outlineDetail
+        let smoothness = outlineSmoothness
         let loaded = await Task.detached(priority: .userInitiated) { () -> (BinaryBitmap, BinaryBitmap?, [Polyline])? in
             guard let bitmap = MaskPNG.readBitmap(from: maskURL, scaledTo: traceSpace) else { return nil }
             // The cut runs exactly on the subject's silhouette — the mask
@@ -167,7 +174,7 @@ final class TraceSession {
             // segmenter's edge strays off the pen line, snapping pulls the
             // cut back onto the drawing's own stroke.
             let ink = BinaryBitmap(cgImage: cgImage)
-            return (bitmap, ink, Self.outlines(of: bitmap, snappedTo: ink, fidelity: fidelity))
+            return (bitmap, ink, Self.outlines(of: bitmap, snappedTo: ink, detail: detail, smoothness: smoothness))
         }.value
         mask = loaded?.0
         snapInk = loaded?.1
@@ -248,9 +255,10 @@ final class TraceSession {
     /// fidelity. 1 hugs every raster bump the segmenter produced; 0
     /// simplifies and smooths hard.
     nonisolated private static func outlines(
-        of mask: BinaryBitmap, snappedTo ink: BinaryBitmap?, fidelity: Double
+        of mask: BinaryBitmap, snappedTo ink: BinaryBitmap?, detail: Double, smoothness: Double
     ) -> [Polyline] {
-        let f = max(0, min(1, fidelity))
+        let d = max(0, min(1, detail))
+        let s = max(0, min(1, smoothness))
         let diagonal = Double(mask.width * mask.width + mask.height * mask.height).squareRoot()
         return MaskGeometry.cutContours(
             of: mask,
@@ -259,24 +267,25 @@ final class TraceSession {
             // ~50px at a 2500px diagonal), small enough not to reach interior
             // features like an eye.
             snapDistance: 0.02 * diagonal,
-            simplifyTolerance: 8 - (8 - 0.75) * f,
-            smoothingPasses: f < 0.5 ? 2 : 1
+            simplifyTolerance: 8 - (8 - 0.75) * d,
+            smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : 2
         )
     }
 
     /// Recomputes the cut outline (and which traced lines it makes
-    /// redundant) when the Outline slider moves.
+    /// redundant) when a Cut slider moves.
     private func scheduleOutlineRefresh() {
         guard let mask else { return }
         outlineTask?.cancel()
-        let fidelity = outlineDetail
+        let detail = outlineDetail
+        let smoothness = outlineSmoothness
         let result = result
         let ink = snapInk
         outlineTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(150))
             guard !Task.isCancelled else { return }
             let computed = await Task.detached(priority: .userInitiated) { () -> ([Polyline], Set<TargetKey>) in
-                let outlines = Self.outlines(of: mask, snappedTo: ink, fidelity: fidelity)
+                let outlines = Self.outlines(of: mask, snappedTo: ink, detail: detail, smoothness: smoothness)
                 var coincident: Set<TargetKey> = []
                 if let result {
                     coincident = Self.coincidentTargets(in: result, outlines: outlines)
@@ -667,6 +676,7 @@ final class TraceSession {
     func saveVersion() throws {
         let snapshot = TraceSnapshot(
             detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail,
+            outlineSmoothness: outlineSmoothness,
             smoothness: smoothness, cutTaps: cutTaps.map { [$0.x, $0.y] },
             editedPaths: editedPaths.map { paths in
                 paths.map { path in
@@ -702,6 +712,7 @@ final class TraceSession {
         if let restored = snapshot.outlineDetail {
             outlineDetail = restored   // triggers outline refresh when changed
         }
+        outlineSmoothness = snapshot.outlineSmoothness ?? TraceParameters.defaultSmoothness
         // Older snapshots predate the Smoothness slider; they were made with
         // what is now its default. Setting these may each schedule a retrace,
         // but scheduling cancels the previous task, so only one trace runs.

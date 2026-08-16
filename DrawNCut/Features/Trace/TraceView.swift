@@ -91,37 +91,18 @@ struct TraceView: View {
         return VStack(spacing: 10) {
             // Sliders re-derive geometry from the photo, which would discard
             // point surgery — so they sleep while points are being edited.
+            // Two matching sections: the red CUT outline and the blue ENGRAVE
+            // lines, each with Detail (what the shape keeps) and Smoothing
+            // (how its curves are drawn).
             Group {
-                // The red cut outline: how faithfully it follows the mask.
                 if session.hasSubjectMask {
-                    HStack {
-                        Text("Outline")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .frame(width: 52, alignment: .leading)
-                        Slider(value: $session.outlineDetail, in: 0...1)
-                            .tint(.red)
-                    }
+                    sectionHeader("Cut", tint: .red)
+                    sliderRow("Detail", value: $session.outlineDetail, tint: .red)
+                    sliderRow("Smoothing", value: $session.outlineSmoothness, tint: .red)
                 }
-                // The blue engrave lines: Detail decides which marks survive…
-                HStack {
-                    Text("Lines")
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                        .frame(width: 52, alignment: .leading)
-                    Slider(value: $session.detail, in: 0...1)
-                        .tint(.blue)
-                }
-                // …and Smooth decides how they are drawn: left keeps every
-                // corner the raster had (jagged), right rounds everything.
-                HStack {
-                    Text("Smooth")
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                        .frame(width: 52, alignment: .leading)
-                    Slider(value: $session.smoothness, in: 0...1)
-                        .tint(.blue.opacity(0.55))
-                }
+                sectionHeader("Engrave", tint: .blue)
+                sliderRow("Detail", value: $session.detail, tint: .blue)
+                sliderRow("Smoothing", value: $session.smoothness, tint: .blue)
             }
             .disabled(pointEditMode)
             .opacity(pointEditMode ? 0.35 : 1)
@@ -165,6 +146,25 @@ struct TraceView: View {
         }
         .padding()
         .background(.bar)
+    }
+
+    private func sectionHeader(_ title: String, tint: Color) -> some View {
+        Text(title)
+            .font(.caption.bold())
+            .foregroundStyle(tint)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sliderRow(_ label: String, value: Binding<Double>, tint: Color) -> some View {
+        HStack {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 76, alignment: .leading)
+            Slider(value: value, in: 0...1)
+                .tint(tint)
+        }
+        .padding(.leading, 8)
     }
 
     private var hint: String {
