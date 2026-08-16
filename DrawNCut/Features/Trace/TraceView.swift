@@ -252,6 +252,29 @@ struct TraceView: View {
     }
 }
 
+/// Where the point-drag loupe sits relative to the finger: above and to the
+/// right by default, flipping side/vertical near viewport edges, finally
+/// clamped fully on-screen. Pure math so it's directly testable.
+enum LoupeGeometry {
+    static let radius: CGFloat = 62
+    /// Extra magnification on top of the user's current zoom.
+    static let magnification: CGFloat = 2.5
+    private static let fingerOffset = CGVector(dx: 84, dy: -104)
+
+    static func center(finger: CGPoint, viewport: CGSize) -> CGPoint {
+        var x = finger.x + fingerOffset.dx
+        var y = finger.y + fingerOffset.dy
+        // Would poke past the right edge → sit to the finger's left.
+        if x + radius > viewport.width { x = finger.x - fingerOffset.dx }
+        // Would poke past the top → sit below the finger.
+        if y - radius < 0 { y = finger.y - fingerOffset.dy }
+        return CGPoint(
+            x: min(max(x, radius), max(radius, viewport.width - radius)),
+            y: min(max(y, radius), max(radius, viewport.height - radius))
+        )
+    }
+}
+
 /// Renders the traced polylines scaled to fit, over the (optional) photo.
 /// Taps map back to image space and erase the nearest line.
 private struct TraceCanvas: View {
@@ -269,6 +292,8 @@ private struct TraceCanvas: View {
     @State private var dragRef: TraceSession.PointRef?
     /// The endpoint the dragged point is currently snapped onto.
     @State private var snapRef: TraceSession.PointRef?
+    /// Where the finger is right now (view space) — anchors the drag loupe.
+    @State private var dragViewLocation: CGPoint?
 
     /// Spot-erase radius as the finger experiences it, regardless of zoom.
     private let eraserViewRadius: CGFloat = 22
@@ -289,51 +314,9 @@ private struct TraceCanvas: View {
                 height: fit.offset.height * zoom + panOffset.height
             )
 
-            Canvas { context, _ in
-                if showPhoto, let image = session.image {
-                    let rect = CGRect(
-                        x: offset.width, y: offset.height,
-                        width: imageSize.width * scale, height: imageSize.height * scale
-                    )
-                    context.opacity = 0.25
-                    context.draw(Image(decorative: image, scale: 1), in: rect)
-                    context.opacity = 1
-                }
-                if let edited = session.editedPaths {
-                    // Point-edited geometry replaces the live trace until the
-                    // next re-trace resets it.
-                    for editablePath in edited {
-                        context.stroke(
-                            path(for: editablePath.polyline, scale: scale, offset: offset),
-                            with: .color(editablePath.isCut ? .red : .blue),
-                            lineWidth: editablePath.isCut ? 3 : 1.5
-                        )
-                    }
-                } else {
-                    for item in session.visible {
-                        // Tap-promoted cut lines draw exactly like the cut
-                        // outline; promotion outranks any pending suggestion.
-                        let style = session.cutTargets.contains(item.key)
-                            ? (color: Color.red, emphasized: true)
-                            : color(for: item.suggestion)
-                        context.stroke(
-                            path(for: item.polyline, scale: scale, offset: offset),
-                            with: .color(style.color),
-                            lineWidth: style.emphasized ? 3 : 1.5
-                        )
-                    }
-                }
-                // The CUT loops (piece edges and holes) — drawn last so they
-                // read as the piece's edges. Red like the DXF CUT layer. Not
-                // erasable: they aren't traced polylines.
-                for outline in session.cutOutlines {
-                    context.stroke(
-                        path(for: outline, scale: scale, offset: offset),
-                        with: .color(.red),
-                        lineWidth: 3
-                    )
-                }
-                // The lasso being drawn right now.
+            Canvas { context, size in
+                drawScene(context, scale: scale, offset: offset)
+                // The lasso being drawn right now (never magnified).
                 if lassoViewPoints.count > 1 {
                     var lasso = Path()
                     lasso.move(to: lassoViewPoints[0])
@@ -344,42 +327,29 @@ private struct TraceCanvas: View {
                         style: StrokeStyle(lineWidth: 2, dash: [6, 4])
                     )
                 }
-                // Control-point handles. Endpoints draw bigger — they're the
-                // joinable ones. Handle size is constant on screen, not in
-                // image space, so zooming in doesn't balloon them.
-                if pointEditMode, let edited = session.editedPaths {
-                    for editablePath in edited {
-                        let polyline = editablePath.polyline
-                        let tint: Color = editablePath.isCut ? .red : .blue
-                        for (index, point) in polyline.points.enumerated() {
-                            let isEndpoint = !polyline.isClosed
-                                && (index == 0 || index == polyline.points.count - 1)
-                            let radius: CGFloat = isEndpoint ? 6 : 3.5
-                            let center = CGPoint(
-                                x: point.x * scale + offset.width,
-                                y: point.y * scale + offset.height
-                            )
-                            let rect = CGRect(
-                                x: center.x - radius, y: center.y - radius,
-                                width: 2 * radius, height: 2 * radius
-                            )
-                            context.fill(Path(ellipseIn: rect), with: .color(.white))
-                            context.stroke(
-                                Path(ellipseIn: rect),
-                                with: .color(tint),
-                                lineWidth: isEndpoint ? 2 : 1.25
-                            )
-                        }
-                    }
-                    // The endpoint the drag is magnetically locked onto.
-                    if let snapRef, let position = session.position(of: snapRef) {
-                        let center = CGPoint(
-                            x: position.x * scale + offset.width,
-                            y: position.y * scale + offset.height
-                        )
-                        let rect = CGRect(x: center.x - 11, y: center.y - 11, width: 22, height: 22)
-                        context.stroke(Path(ellipseIn: rect), with: .color(.green), lineWidth: 3)
-                    }
+                // The drag loupe: the finger hides exactly the point being
+                // placed, so a magnified circle floats beside it showing the
+                // point, its surroundings, and the snap ring.
+                if pointEditMode, let dragRef, let finger = dragViewLocation,
+                   let point = session.position(of: dragRef) {
+                    let center = LoupeGeometry.center(finger: finger, viewport: size)
+                    let radius = LoupeGeometry.radius
+                    let circle = Path(ellipseIn: CGRect(
+                        x: center.x - radius, y: center.y - radius,
+                        width: 2 * radius, height: 2 * radius
+                    ))
+                    // The loupe keeps the dragged point at its center: solve
+                    // the magnified transform for point → center.
+                    let loupeScale = scale * LoupeGeometry.magnification
+                    let loupeOffset = CGSize(
+                        width: center.x - point.x * loupeScale,
+                        height: center.y - point.y * loupeScale
+                    )
+                    var loupe = context
+                    loupe.clip(to: circle)
+                    loupe.fill(circle, with: .color(.white))
+                    drawScene(loupe, scale: loupeScale, offset: loupeOffset)
+                    context.stroke(circle, with: .color(.gray.opacity(0.7)), lineWidth: 2)
                 }
             }
             .contentShape(Rectangle())
@@ -405,6 +375,7 @@ private struct TraceCanvas: View {
                             snapRef = nil
                         }
                         guard let ref = dragRef else { return }
+                        dragViewLocation = current
                         if let target = session.snapTarget(
                             for: ref, near: location, radius: snapViewRadius / scale),
                            let magnet = session.position(of: target) {
@@ -429,6 +400,7 @@ private struct TraceCanvas: View {
                         }
                         dragRef = nil
                         snapRef = nil
+                        dragViewLocation = nil
                         return
                     }
                     let toImage = { (p: CGPoint) in
@@ -469,6 +441,101 @@ private struct TraceCanvas: View {
             }
         }
         .background(Color.white)
+    }
+
+    /// Everything that belongs to the drawing itself — photo, paths, cut
+    /// loops, and (in point-edit mode) control-point handles and the snap
+    /// ring. Drawn once for the screen and again, magnified, inside the
+    /// drag loupe.
+    private func drawScene(_ context: GraphicsContext, scale: Double, offset: CGSize) {
+        var context = context
+        if showPhoto, let image = session.image,
+           let imageSize = session.result?.imageSize {
+            let rect = CGRect(
+                x: offset.width, y: offset.height,
+                width: imageSize.width * scale, height: imageSize.height * scale
+            )
+            context.opacity = 0.25
+            context.draw(Image(decorative: image, scale: 1), in: rect)
+            context.opacity = 1
+        }
+        if let edited = session.editedPaths {
+            // Point-edited geometry replaces the live trace until the
+            // next re-trace resets it.
+            for editablePath in edited {
+                context.stroke(
+                    path(for: editablePath.polyline, scale: scale, offset: offset),
+                    with: .color(editablePath.isCut ? .red : .blue),
+                    lineWidth: editablePath.isCut ? 3 : 1.5
+                )
+            }
+        } else {
+            for item in session.visible {
+                // Tap-promoted cut lines draw exactly like the cut
+                // outline; promotion outranks any pending suggestion.
+                let style = session.cutTargets.contains(item.key)
+                    ? (color: Color.red, emphasized: true)
+                    : color(for: item.suggestion)
+                context.stroke(
+                    path(for: item.polyline, scale: scale, offset: offset),
+                    with: .color(style.color),
+                    lineWidth: style.emphasized ? 3 : 1.5
+                )
+            }
+        }
+        // The CUT loops (piece edges and holes) — drawn last so they
+        // read as the piece's edges. Red like the DXF CUT layer. Not
+        // erasable: they aren't traced polylines.
+        for outline in session.cutOutlines {
+            context.stroke(
+                path(for: outline, scale: scale, offset: offset),
+                with: .color(.red),
+                lineWidth: 3
+            )
+        }
+        // Control-point handles. Endpoints draw bigger — they're the
+        // joinable ones. Handle size is constant on screen, not in
+        // image space, so zooming in doesn't balloon them.
+        if pointEditMode, let edited = session.editedPaths {
+            for (pathIndex, editablePath) in edited.enumerated() {
+                let polyline = editablePath.polyline
+                let tint: Color = editablePath.isCut ? .red : .blue
+                for (index, point) in polyline.points.enumerated() {
+                    let ref = TraceSession.PointRef(path: pathIndex, point: index)
+                    let isEndpoint = !polyline.isClosed
+                        && (index == 0 || index == polyline.points.count - 1)
+                    let radius: CGFloat = isEndpoint ? 6 : 3.5
+                    let center = CGPoint(
+                        x: point.x * scale + offset.width,
+                        y: point.y * scale + offset.height
+                    )
+                    let rect = CGRect(
+                        x: center.x - radius, y: center.y - radius,
+                        width: 2 * radius, height: 2 * radius
+                    )
+                    // The point in hand fills orange so it reads instantly
+                    // in the loupe.
+                    context.fill(
+                        Path(ellipseIn: rect),
+                        with: .color(ref == dragRef ? .orange : .white)
+                    )
+                    context.stroke(
+                        Path(ellipseIn: rect),
+                        with: .color(tint),
+                        lineWidth: isEndpoint ? 2 : 1.25
+                    )
+                }
+            }
+            // The endpoint the drag is magnetically locked onto.
+            if let snapRef, let position = session.position(of: snapRef) {
+                let center = CGPoint(
+                    x: position.x * scale + offset.width,
+                    y: position.y * scale + offset.height
+                )
+                let rect = CGRect(x: center.x - 11, y: center.y - 11, width: 22, height: 22)
+                context.stroke(Path(ellipseIn: rect), with: .color(.green), lineWidth: 3)
+            }
+        }
     }
 
     private func clampPan(viewport: CGSize) {

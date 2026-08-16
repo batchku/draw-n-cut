@@ -63,6 +63,37 @@ final class EndToEndTests: XCTestCase {
         // an arbitrary camera scene may legitimately trace to nothing.
     }
 
+    /// Point-edit smoke test: toggle Points on the traced fish and drag
+    /// across its dense center — grabbing a control point renders the drag
+    /// loupe. The assertion is the whole flow surviving with paths intact.
+    func testPointEditDragWithLoupeSurvives() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["DEMO_IMAGE"] = "bundled:fish-photo"
+        app.launch()
+
+        let canvas = app.otherElements["traceCanvas"]
+        XCTAssertTrue(canvas.waitForExistence(timeout: 20), "trace screen should appear")
+        let pathsBefore = try waitForTracedPaths(on: canvas, timeout: 45)
+        XCTAssertGreaterThan(pathsBefore, 5)
+
+        let toggle = app.switches["pointEditToggle"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "Points switch should exist")
+        toggle.tap()
+
+        // Two drags through the fish's center region; each that lands on a
+        // control point moves it under the loupe.
+        for (fromX, fromY, toX, toY) in [(0.5, 0.45, 0.58, 0.5), (0.45, 0.55, 0.4, 0.48)] {
+            let start = canvas.coordinate(withNormalizedOffset: CGVector(dx: fromX, dy: fromY))
+            let end = canvas.coordinate(withNormalizedOffset: CGVector(dx: toX, dy: toY))
+            start.press(forDuration: 0.35, thenDragTo: end)
+        }
+        attachScreenshot(of: app, named: "point-edit-after-drags")
+
+        XCTAssertTrue(canvas.exists, "canvas must survive point drags")
+        let pathsAfter = try waitForTracedPaths(on: canvas, timeout: 10)
+        XCTAssertGreaterThan(pathsAfter, 0, "paths must still render after point edits")
+    }
+
     private func waitForTracedPaths(on canvas: XCUIElement, timeout: TimeInterval) throws -> Int {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {

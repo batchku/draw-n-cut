@@ -81,6 +81,43 @@ struct PointEditTests {
         #expect(points.last == SIMD2(0, 100), "b reversed so its snapped end receives the join")
     }
 
+    // MARK: - Drag loupe placement
+
+    @Test func loupeSitsTopRightOfTheFinger() {
+        let viewport = CGSize(width: 400, height: 800)
+        let center = LoupeGeometry.center(finger: CGPoint(x: 200, y: 400), viewport: viewport)
+        #expect(center.x > 200 && center.y < 400, "default placement is above-right")
+        #expect(center.x + LoupeGeometry.radius <= 400)
+        #expect(center.y - LoupeGeometry.radius >= 0)
+    }
+
+    @Test func loupeFlipsAwayFromEdges() {
+        let viewport = CGSize(width: 400, height: 800)
+        // Near the right edge → flips to the finger's left.
+        let nearRight = LoupeGeometry.center(finger: CGPoint(x: 390, y: 400), viewport: viewport)
+        #expect(nearRight.x < 390)
+        #expect(nearRight.x + LoupeGeometry.radius <= 400)
+        // Near the top → sits below the finger.
+        let nearTop = LoupeGeometry.center(finger: CGPoint(x: 200, y: 40), viewport: viewport)
+        #expect(nearTop.y > 40)
+        // Top-right corner → both flips at once.
+        let corner = LoupeGeometry.center(finger: CGPoint(x: 390, y: 30), viewport: viewport)
+        #expect(corner.x < 390 && corner.y > 30)
+    }
+
+    @Test func loupeStaysOnScreenEverywhere() {
+        let viewport = CGSize(width: 400, height: 800)
+        for x in stride(from: 0.0, through: 400, by: 50) {
+            for y in stride(from: 0.0, through: 800, by: 100) {
+                let center = LoupeGeometry.center(finger: CGPoint(x: x, y: y), viewport: viewport)
+                #expect(center.x - LoupeGeometry.radius >= -0.001)
+                #expect(center.x + LoupeGeometry.radius <= 400.001)
+                #expect(center.y - LoupeGeometry.radius >= -0.001)
+                #expect(center.y + LoupeGeometry.radius <= 800.001)
+            }
+        }
+    }
+
     // MARK: - Session integration
 
     @MainActor
