@@ -437,7 +437,11 @@ private struct TraceCanvas: View {
             .contentShape(Rectangle())
             .accessibilityElement()
             .accessibilityIdentifier("traceCanvas")
-            .accessibilityValue("\(session.visible.count) paths")
+            // Cut count is part of the canvas's exposed value so a UI test
+            // can prove tap-to-cut still works. It regressed once and shipped
+            // unnoticed precisely because nothing outside the session could
+            // observe it.
+            .accessibilityValue("\(session.visible.count) paths, \(session.cutOutlines.count + session.promotedCuts.count) cuts")
             .overlay(alignment: .bottomTrailing) {
                 // Pan runs far past the screen edges on purpose, so the way
                 // back has to be visible rather than a remembered gesture.

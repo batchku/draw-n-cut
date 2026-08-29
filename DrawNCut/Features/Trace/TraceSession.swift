@@ -413,6 +413,14 @@ final class TraceSession {
     /// the Engrave sliders — and its traced source hides. Tapping the frozen
     /// red line again demotes it: the copy is dropped and the source shows.
     func toggleCut(at point: SIMD2<Double>) {
+        // Once the brush or point editing has frozen the trace, `editedPaths`
+        // is what the canvas draws. Appending to `promotedCuts` then put the
+        // cut somewhere nothing rendered, so the tap silently did nothing --
+        // which is how tap-to-cut came to look like it had been removed.
+        if editedPaths != nil {
+            toggleCutOnFrozenPath(at: point)
+            return
+        }
         let promoted = nearestPromotedCut(to: point)
         let traced = nearestVisibleTarget(to: point)
         switch (promoted, traced) {
@@ -425,6 +433,37 @@ final class TraceSession {
         case (nil, nil):
             break
         }
+    }
+
+    /// The frozen-geometry twin of promote/demote: one flag on one path, so
+    /// a line can go blue → red → blue as many times as the user likes.
+    /// Recorded as its own undo entry, like every other frozen-geometry edit.
+    private func toggleCutOnFrozenPath(at point: SIMD2<Double>) {
+        guard let paths = editedPaths else { return }
+        let threshold = tapThreshold
+        var best: (index: Int, distance: Double)?
+        for (index, path) in paths.enumerated() {
+            var points = path.polyline.points
+            if path.polyline.isClosed, let first = points.first { points.append(first) }
+            guard points.count > 1 else { continue }
+            for i in 0..<(points.count - 1) {
+                let d = PathGeometry.distanceToSegment(point, points[i], points[i + 1])
+                if d < (best?.distance ?? threshold) { best = (index, d) }
+            }
+        }
+        guard let hit = best else { return }
+        var updated = paths
+        updated[hit.index].isCut.toggle()
+        beginEditGesture()
+        applyEdit(updated, previous: paths)
+        endEditGesture()
+    }
+
+    /// How close a tap has to land to claim a line. Relative to the image
+    /// diagonal so it is a thumb's width regardless of resolution.
+    private var tapThreshold: Double {
+        guard let result else { return 40 }
+        return 0.025 * hypot(result.imageSize.width, result.imageSize.height)
     }
 
     private func promote(_ key: TargetKey) {
@@ -729,7 +768,7 @@ final class TraceSession {
 
     private func nearestVisibleTarget(to point: SIMD2<Double>) -> (key: TargetKey, distance: Double)? {
         guard let result else { return nil }
-        let threshold = 0.025 * hypot(result.imageSize.width, result.imageSize.height)
+        let threshold = tapThreshold
         var best: (TargetKey, Double)?
         for (e, element) in result.elements.enumerated() {
             for (p, polyline) in element.polylines.enumerated() {
