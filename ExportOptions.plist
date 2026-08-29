@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>app-store-connect</string>
+    <key>destination</key>
+    <string>upload</string>
+    <key>teamID</key>
+    <string>V9DBGV72NL</string>
+    <!-- Manual signing with the identity and profile bootstrap_signing.sh
+         set up. Automatic signing would fall back to Apple's cloud-signing
+         service, which needs an Apple ID session this team's API key cannot
+         stand in for, and so cannot run unattended. -->
+    <key>signingStyle</key>
+    <string>manual</string>
+    <key>provisioningProfiles</key>
+    <dict>
+        <key>ai.kidwiz.drawncut</key>
+        <string>DrawNCut App Store (headless)</string>
+    </dict>
+    <key>uploadSymbols</key>
+    <true/>
+    <!-- scripts/bump_build.sh owns the build number; Xcode must not pick one. -->
+    <key>manageAppVersionAndBuildNumber</key>
+    <false/>
+</dict>
+</plist>

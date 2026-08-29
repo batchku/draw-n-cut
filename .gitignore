@@ -17,3 +17,6 @@ build/
 build-ios/
 build-sim/
 build-archive/
+
+# Deploy credentials (identifiers plus a local keychain password)
+.deploy.env
