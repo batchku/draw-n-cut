@@ -19,7 +19,7 @@ settings:
     # may touch it. Seeded at 45, the last build uploaded under the previous
     # commit-count scheme.
     MARKETING_VERSION: "0.2.3"
-    CURRENT_PROJECT_VERSION: "48"
+    CURRENT_PROJECT_VERSION: "49"
   configs:
     # The trace pipeline is heavy numeric Swift; unoptimized it takes tens of
     # seconds per page. Keep -O in Debug so on-device testing feels real.
