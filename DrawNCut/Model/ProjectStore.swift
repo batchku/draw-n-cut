@@ -8,7 +8,7 @@ import Observation
 ///         original.jpg      photo as shot
 ///         rectified.png     perspective-corrected, normalized drawing
 ///         mask.png          SAM subject mask
-///         thumbnail.jpg     photo + traced lines, for the library list
+///         thumbnail.png     segmented drawing + traced lines, for the library
 ///         traces/v<N>.json  vector paths for each trace version
 ///         exports/*.dxf     exported DXFs
 @Observable
@@ -145,7 +145,34 @@ final class ProjectStore {
     /// The library row's picture: the photo with its traced lines over it.
     /// Rewritten after each trace, so it always shows the current state.
     func thumbnailURL(for project: DrawingProject) -> URL {
-        directory(for: project).appending(path: "thumbnail.jpg")
+        directory(for: project).appending(path: "thumbnail.png")
+    }
+
+    /// Everything `ThumbnailBuilder` needs, gathered on the main actor so the
+    /// build itself can run detached without touching the store.
+    struct ThumbnailJob: Sendable {
+        var photoURL: URL
+        var maskURL: URL
+        var versionURL: URL?
+        var destination: URL
+    }
+
+    /// Projects whose thumbnail is missing or older than their last change.
+    func thumbnailJobs() -> [ThumbnailJob] {
+        projects.compactMap { project in
+            let destination = thumbnailURL(for: project)
+            guard FileManager.default.fileExists(atPath: originalImageURL(for: project).path),
+                  ThumbnailBuilder.isStale(thumbnail: destination, project: project.updatedAt)
+            else { return nil }
+            return ThumbnailJob(
+                photoURL: originalImageURL(for: project),
+                maskURL: maskURL(for: project),
+                versionURL: project.activeTraceVersion.map {
+                    tracePathsURL(for: $0, in: project)
+                },
+                destination: destination
+            )
+        }
     }
 
     func maskURL(for project: DrawingProject) -> URL {

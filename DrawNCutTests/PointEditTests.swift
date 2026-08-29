@@ -171,26 +171,29 @@ struct PointEditTests {
 
     // MARK: - Drag loupe placement
 
-    @Test func loupeSitsTopRightOfTheFinger() {
+    /// Above and to the LEFT by default: a right-handed hand comes in from
+    /// the right, so a loupe on that side sits under the very hand it is
+    /// there to see around.
+    @Test func loupeSitsTopLeftOfTheFinger() {
         let viewport = CGSize(width: 400, height: 800)
         let center = LoupeGeometry.center(finger: CGPoint(x: 200, y: 400), viewport: viewport)
-        #expect(center.x > 200 && center.y < 400, "default placement is above-right")
-        #expect(center.x + LoupeGeometry.radius <= 400)
+        #expect(center.x < 200 && center.y < 400, "default placement is above-left")
+        #expect(center.x - LoupeGeometry.radius >= 0)
         #expect(center.y - LoupeGeometry.radius >= 0)
     }
 
     @Test func loupeFlipsAwayFromEdges() {
         let viewport = CGSize(width: 400, height: 800)
-        // Near the right edge → flips to the finger's left.
-        let nearRight = LoupeGeometry.center(finger: CGPoint(x: 390, y: 400), viewport: viewport)
-        #expect(nearRight.x < 390)
-        #expect(nearRight.x + LoupeGeometry.radius <= 400)
+        // Near the left edge → flips to the finger's right.
+        let nearLeft = LoupeGeometry.center(finger: CGPoint(x: 10, y: 400), viewport: viewport)
+        #expect(nearLeft.x > 10)
+        #expect(nearLeft.x - LoupeGeometry.radius >= 0)
         // Near the top → sits below the finger.
         let nearTop = LoupeGeometry.center(finger: CGPoint(x: 200, y: 40), viewport: viewport)
         #expect(nearTop.y > 40)
-        // Top-right corner → both flips at once.
-        let corner = LoupeGeometry.center(finger: CGPoint(x: 390, y: 30), viewport: viewport)
-        #expect(corner.x < 390 && corner.y > 30)
+        // Top-left corner → both flips at once.
+        let corner = LoupeGeometry.center(finger: CGPoint(x: 10, y: 30), viewport: viewport)
+        #expect(corner.x > 10 && corner.y > 30)
     }
 
     @Test func loupeStaysOnScreenEverywhere() {

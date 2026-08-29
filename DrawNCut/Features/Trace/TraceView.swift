@@ -92,10 +92,21 @@ struct TraceView: View {
                             .padding(20)
                             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     } else if session.result != nil && session.visible.isEmpty {
-                        ContentUnavailableView {
-                            Label("Nothing to Trace", systemImage: "eye.slash")
-                        } description: {
-                            Text("No drawing was found in this photo. Retake it with more light, filling the frame with the page.")
+                        if session.thresholdSwampedThePage {
+                            // The photo is fine; the slider is too high. The
+                            // generic advice used to send people off to
+                            // retake a picture that was never the problem.
+                            ContentUnavailableView {
+                                Label("Threshold Too High", systemImage: "slider.horizontal.3")
+                            } description: {
+                                Text("So much of the photo is being read as ink that the drawing is lost in it. Lower Threshold.")
+                            }
+                        } else {
+                            ContentUnavailableView {
+                                Label("Nothing to Trace", systemImage: "eye.slash")
+                            } description: {
+                                Text("No drawing was found in this photo. Retake it with more light, filling the frame with the page.")
+                            }
                         }
                     }
                 }
@@ -151,9 +162,6 @@ struct TraceView: View {
                     }
                 }
                 Spacer()
-                Text(hint)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
                 Button {
                     session.undo()
                 } label: {
@@ -203,9 +211,10 @@ struct TraceView: View {
                         .font(.title2)
                         .foregroundStyle(eraserMode ? Color.accentColor : Color.secondary)
                 }
-                .accessibilityLabel(eraserMode ? "Eraser on" : "Eraser off")
+                .accessibilityLabel(eraserMode ? "Eraser lasso on" : "Eraser lasso off")
                 .accessibilityIdentifier("eraserToggle")
             }
+            toolDescriptionView
         }
         .padding()
         .background(.bar)
@@ -230,20 +239,49 @@ struct TraceView: View {
         .padding(.leading, 8)
     }
 
-    private var hint: String {
+    /// What the selected tool does and how to use it. One line, always in
+    /// the same place, so picking up a tool explains itself instead of
+    /// needing to be guessed at.
+    private var toolDescription: (name: String, help: String)? {
         if pointEditMode {
-            return "Drag points • drop an endpoint on another to join"
+            return ("Points",
+                    "Drag any control point. Drop an endpoint onto another to join two lines.")
         }
         if brushMode {
-            return "Sweep over jagged lines to smooth • scrub for more"
+            return ("Smoothing brush",
+                    "Sweep along a jagged line to round it out. Scrub back and forth for more.")
         }
         if penMode {
-            return "Draw over a line to replace that stretch with your stroke"
+            return ("Pen",
+                    "Draw over a stretch of a line and your stroke replaces it — the way to simplify a messy run.")
         }
         if eraserMode {
-            return "Circle around things to erase • two-finger tap undoes"
+            return ("Eraser lasso",
+                    "Circle part of a shape to delete the points inside it. Tap a line to rub it out.")
         }
-        return ""
+        return nil
+    }
+
+    private var toolDescriptionView: some View {
+        Group {
+            if let tool = toolDescription {
+                (Text(tool.name).font(.caption.bold()).foregroundStyle(Color.accentColor)
+                 + Text("  ") + Text(tool.help).font(.caption))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Tap a line to switch it between engrave and cut.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .accessibilityIdentifier("toolDescription")
+        // Reserved height: the row must not jump as tools are selected.
+        .frame(minHeight: 32, alignment: .top)
+        .animation(.easeInOut(duration: 0.15), value: toolDescription?.name)
     }
 
     @ToolbarContentBuilder
@@ -343,13 +381,15 @@ enum LoupeGeometry {
     static let radius: CGFloat = 62
     /// Extra magnification on top of the user's current zoom.
     static let magnification: CGFloat = 2.5
-    private static let fingerOffset = CGVector(dx: 84, dy: -104)
+    /// Up and to the LEFT: most people draw right-handed, so the hand comes
+    /// in from the right and would cover a loupe placed on that side.
+    private static let fingerOffset = CGVector(dx: -84, dy: -104)
 
     static func center(finger: CGPoint, viewport: CGSize) -> CGPoint {
         var x = finger.x + fingerOffset.dx
         var y = finger.y + fingerOffset.dy
-        // Would poke past the right edge → sit to the finger's left.
-        if x + radius > viewport.width { x = finger.x - fingerOffset.dx }
+        // Would poke past the left edge → sit to the finger's right instead.
+        if x - radius < 0 { x = finger.x - fingerOffset.dx }
         // Would poke past the top → sit below the finger.
         if y - radius < 0 { y = finger.y - fingerOffset.dy }
         return CGPoint(
@@ -484,6 +524,31 @@ private struct TraceCanvas: View {
                     loupe.clip(to: circle)
                     loupe.fill(circle, with: .color(.white))
                     drawScene(loupe, scale: loupeScale, offset: loupeOffset)
+                    // The stroke in flight is not part of the scene yet — it
+                    // only becomes geometry on finger-up. Without drawing it
+                    // here the loupe showed everything except the one thing
+                    // being drawn, which is what the loupe is for.
+                    if penViewPoints.count > 1 {
+                        var stroke = Path()
+                        let magnified = penViewPoints.map { point -> CGPoint in
+                            // view → image → loupe
+                            let image = CGPoint(
+                                x: (point.x - offset.width) / scale,
+                                y: (point.y - offset.height) / scale
+                            )
+                            return CGPoint(
+                                x: image.x * loupeScale + loupeOffset.width,
+                                y: image.y * loupeScale + loupeOffset.height
+                            )
+                        }
+                        stroke.move(to: magnified[0])
+                        for point in magnified.dropFirst() { stroke.addLine(to: point) }
+                        loupe.stroke(
+                            stroke,
+                            with: .color(.green),
+                            style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                        )
+                    }
                     context.stroke(circle, with: .color(.gray.opacity(0.7)), lineWidth: 2)
                 }
             }

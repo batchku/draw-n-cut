@@ -848,19 +848,38 @@ final class TraceSession {
     /// the masked re-trace is authoritative.
     func eraseLasso(points: [SIMD2<Double>]) {
         guard points.count >= 3 else { return }
-        eraseShapes.append(.lasso(points: points))
-        eraseBatchSizes.append(1)
-        if let result {
-            for (e, element) in result.elements.enumerated() {
-                for (p, polyline) in element.polylines.enumerated() {
-                    let inside = polyline.points.count { PathGeometry.polygon(points, contains: $0) }
-                    if inside * 2 > polyline.points.count {
-                        removedTargets.insert(TargetKey(elementIndex: e, polylineIndex: p))
-                    }
-                }
+        // Point surgery, on the geometry the canvas is actually drawing.
+        // Circling part of a shape now deletes the control points inside and
+        // lets the neighbours join, which is what a lasso eraser is expected
+        // to do; the old ink-erasure rule only dropped a whole line when most
+        // of it was enclosed, so lassoing part of a large shape did nothing.
+        // It also wrote to the live trace, which is invisible once the brush
+        // or pen has frozen the geometry.
+        lassoDeletePoints(region: points)
+    }
+
+    /// Deletes the enclosed control points from the frozen geometry, dropping
+    /// any path left too short to be a line.
+    private func lassoDeletePoints(region: [SIMD2<Double>]) {
+        beginPointEditing()
+        guard let paths = editedPaths else { return }
+        var updated: [EditablePath] = []
+        var changed = false
+        for path in paths {
+            switch LassoErase.apply(region: region, to: path.polyline) {
+            case .unchanged:
+                updated.append(path)
+            case .reshaped(let polyline):
+                updated.append(EditablePath(polyline: polyline, isCut: path.isCut))
+                changed = true
+            case .removed:
+                changed = true
             }
         }
-        scheduleRetrace(debounce: true)
+        guard changed else { return }
+        beginEditGesture()
+        applyEdit(updated, previous: paths)
+        endEditGesture()
     }
 
     /// Spot erase (a tap): a brush dot into the mask, with instant
@@ -895,11 +914,12 @@ final class TraceSession {
         let engrave = displayPolylines(cut: false)
         let cuts = displayPolylines(cut: true)
         let imageSize = result.imageSize
+        let subject = mask
         let url = store.thumbnailURL(for: project)
         Task.detached(priority: .utility) {
             ThumbnailRenderer.write(
                 photo: image, engrave: engrave, cuts: cuts,
-                imageSize: imageSize, to: url)
+                imageSize: imageSize, subject: subject, to: url)
         }
     }
 
@@ -912,6 +932,18 @@ final class TraceSession {
         }
         return wantCut ? cutOutlines + promotedCuts : visible.map(\.polyline)
     }
+
+    /// True when binarization swamped the page: so much of the frame came
+    /// out as ink that the background guards threw the result away. The
+    /// cause is the Threshold slider, not the photograph, and saying
+    /// "retake it with more light" would send the user the wrong way.
+    var thresholdSwampedThePage: Bool {
+        guard let fraction = result?.binarization?.inkFraction else { return false }
+        return fraction > Self.swampedInkFraction
+    }
+
+    /// A line drawing sits in the low single-digit percents of the frame.
+    static let swampedInkFraction = 0.30
 
     // MARK: - Pen
 

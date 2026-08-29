@@ -41,13 +41,69 @@ struct ThumbnailRendererTests {
         Polyline(points: (0...20).map { SIMD2(Double($0) * 10, y) }, isClosed: false)
     }
 
-    @Test func theThumbnailFitsInsideItsLongestEdge() throws {
+    /// Square, because the row's slot is square: framing the drawing itself
+    /// means the photo's aspect ratio is no longer what decides the shape.
+    @Test func theThumbnailIsASquareOfTheExpectedSize() throws {
         let image = try #require(ThumbnailRenderer.render(
             photo: greyPhoto(), engrave: [], cuts: [],
             imageSize: CGSize(width: 2000, height: 1000)))
-        #expect(max(image.width, image.height) == Int(ThumbnailRenderer.maxSide))
-        // Aspect ratio survives, so drawings are not squashed in the list.
-        #expect(abs(Double(image.width) / Double(image.height) - 2) < 0.02)
+        #expect(image.width == Int(ThumbnailRenderer.maxSide))
+        #expect(image.height == Int(ThumbnailRenderer.maxSide))
+    }
+
+    /// A subject mask in the corner of a big frame.
+    private func cornerMask(size: Int = 200) -> BinaryBitmap {
+        var bitmap = BinaryBitmap(width: size, height: size)
+        for y in 20..<70 { for x in 20..<70 { bitmap[x, y] = true } }
+        return bitmap
+    }
+
+    @Test func theFrameFollowsTheSubjectNotThePhoto() {
+        let frame = ThumbnailRenderer.frame(
+            imageSize: CGSize(width: 200, height: 200),
+            subject: cornerMask(), lines: [])
+        // Centred on the mask (45,45), not on the photo (100,100).
+        #expect(abs(frame.midX - 45) < 2, "frame centred at \(frame.midX)")
+        #expect(abs(frame.midY - 45) < 2)
+        #expect(frame.width < 100, "the frame did not tighten onto the subject")
+        #expect(frame.width == frame.height, "the frame must be square")
+    }
+
+    @Test func withoutAMaskTheFrameFollowsTheTracedLines() {
+        let frame = ThumbnailRenderer.frame(
+            imageSize: CGSize(width: 400, height: 400),
+            subject: nil,
+            lines: [Polyline(points: [SIMD2(300, 300), SIMD2(340, 340)], isClosed: false)])
+        #expect(abs(frame.midX - 320) < 5, "frame centred at \(frame.midX)")
+        #expect(frame.width < 200)
+    }
+
+    @Test func aBlankProjectFallsBackToTheWholeFrame() {
+        let frame = ThumbnailRenderer.frame(
+            imageSize: CGSize(width: 300, height: 200), subject: nil, lines: [])
+        #expect(abs(frame.midX - 150) < 1)
+        #expect(abs(frame.midY - 100) < 1)
+    }
+
+    /// The point of segmenting: everything outside the subject is cut away,
+    /// so the row shows a drawing rather than a photo of a page.
+    @Test func theBackgroundOutsideTheSubjectIsTransparent() throws {
+        let image = try #require(ThumbnailRenderer.render(
+            photo: greyPhoto(), engrave: [], cuts: [],
+            imageSize: CGSize(width: 200, height: 200), subject: cornerMask()))
+        let data = pixels(of: image)
+
+        var opaque = 0
+        var clear = 0
+        for i in stride(from: 0, to: data.count, by: 4) {
+            if data[i + 3] > 200 { opaque += 1 } else if data[i + 3] < 40 { clear += 1 }
+        }
+        #expect(opaque > 0, "the subject itself was cut away too")
+        #expect(clear > 0, "nothing was made transparent — the background is still there")
+        // The mask is a square inside a padded square frame, so a good
+        // fraction of the thumbnail must be clear.
+        #expect(clear > data.count / 4 / 10,
+                "only \(clear) transparent pixels — the cut-out barely happened")
     }
 
     @Test func theTracedLinesAreActuallyDrawn() throws {

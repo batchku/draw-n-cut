@@ -160,7 +160,7 @@ struct InkThresholdTests {
             previousCut = gate.darkCutPercent
         }
         #expect(InkThreshold(slider: 0).minContrast == 90)
-        #expect(InkThreshold(slider: 1).minContrast == 2)
+        #expect(InkThreshold(slider: 1).minContrast == 3)
     }
 
     /// The point of the slider: a stroke too faint to register at the default
@@ -173,8 +173,13 @@ struct InkThresholdTests {
         let high = InkThreshold(slider: 1)
         #expect(low.minContrast >= 8 * high.minContrast,
                 "the strict end must demand far more contrast than the permissive one")
-        #expect(high.darkCutPercent - low.darkCutPercent >= 60,
+        #expect(high.darkCutPercent > low.darkCutPercent,
                 "the ink cut barely moves across the slider's range")
+        // Thickness is deliberately NOT pushed to an extreme: past roughly
+        // three quarters the paper beside a stroke starts counting as ink,
+        // strokes fuse, and the page collapses into one blob.
+        #expect(high.darkCutPercent <= 75,
+                "the top of the range fattens strokes until they merge")
     }
 
     @Test func raisingThresholdRecoversAFaintStroke() throws {

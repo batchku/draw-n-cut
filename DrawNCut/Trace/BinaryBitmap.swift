@@ -8,6 +8,10 @@ import Foundation
 /// figures are the statistics the mask gating read, in gray levels.
 struct BinarizationReport: Sendable {
     var inkPixelCount: Int
+    /// Share of the frame that came out as ink. A line drawing sits in the
+    /// low single-digit percents; anything approaching a third means the
+    /// threshold has swamped the page rather than found more of the drawing.
+    var inkFraction: Double = 0
     var paperMaskActive: Bool
     var paperCoverage: Double
     var otsuClassSeparation: Double
@@ -42,15 +46,19 @@ struct InkThreshold: Equatable {
                                  : anchor + (permissive - anchor) * ((t - 0.5) / 0.5)
             return Int64(value.rounded())
         }
-        // The ends are deliberately far apart: at the first try the slider
-        // moved so little that it read as doing nothing. 90 rejects all but
-        // heavy confident pen work; 2 is at the sensor-noise floor, which is
-        // the whole point of reaching for the top end on a faint drawing.
-        minContrast = through(90, 25, 2)
-        // At the top the cut swallows the paper right next to a stroke, so
-        // neighbouring lines thicken and can fuse -- acceptable, because that
-        // end exists to drag out marks that otherwise never appear at all.
-        darkCutPercent = through(25, 60, 92)
+        // These two are not interchangeable, and pushing both to their
+        // extremes was a mistake. `minContrast` is the sensitivity knob: low
+        // means faint marks register, which is what "more detail" asks for.
+        // `darkCutPercent` is the *thickness* knob: high means more of the
+        // paper beside a stroke counts as ink, so strokes fatten, neighbours
+        // fuse, and past a point the whole page reads as one blob that the
+        // background guards then throw away -- detail going DOWN as the
+        // slider goes up, ending in "Nothing to Trace".
+        //
+        // So the range is wide on sensitivity and deliberately moderate on
+        // thickness.
+        minContrast = through(90, 25, 3)
+        darkCutPercent = through(30, 60, 70)
     }
 }
 
@@ -160,6 +168,7 @@ struct BinaryBitmap {
         // before the ink is carved into components.
         let bridged = BinaryBitmap(width: w, height: h, pixels: ink).closed(radius: 1)
         diagnostics.inkPixelCount = bridged.pixels.reduce(into: 0) { if $1 { $0 += 1 } }
+        diagnostics.inkFraction = w * h > 0 ? Double(diagnostics.inkPixelCount) / Double(w * h) : 0
         self.pixels = bridged.pixels
         report = diagnostics
     }
