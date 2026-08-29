@@ -14,6 +14,10 @@ struct DrawingProject: Codable, Identifiable, Equatable {
     /// Which version the user is currently working from (restoring an old
     /// version just moves this pointer — nothing is deleted).
     var activeTraceVersionID: UUID?
+    /// The taps that produced `mask.png`, kept so the refine screen can be
+    /// reopened on an existing selection and adjusted. Absent for projects
+    /// segmented before this was recorded, and for ones traced whole.
+    var maskPrompts: [MaskPrompt]?
 
     init(id: UUID = UUID(), title: String, createdAt: Date = .now) {
         self.id = id
@@ -23,11 +27,22 @@ struct DrawingProject: Codable, Identifiable, Equatable {
         self.scale = nil
         self.traceVersions = []
         self.activeTraceVersionID = nil
+        self.maskPrompts = nil
     }
 
     var activeTraceVersion: TraceVersion? {
         traceVersions.first { $0.id == activeTraceVersionID } ?? traceVersions.last
     }
+}
+
+/// One subject-selection tap, stored normalized to the image's own size so
+/// it survives any future change to the decode resolution.
+struct MaskPrompt: Codable, Equatable {
+    /// 0...1 across the image, origin at its top-left.
+    var x: Double
+    var y: Double
+    /// False for the minus markers that carve regions back out.
+    var isSubject: Bool
 }
 
 /// How the drawing's real-world size was established.

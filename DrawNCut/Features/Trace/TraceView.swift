@@ -15,6 +15,8 @@ struct TraceView: View {
     @State private var eraserMode = false
     @State private var pointEditMode = false
     @State private var brushMode = false
+    @State private var renaming = false
+    @State private var draftTitle = ""
 
     var body: some View {
         Group {
@@ -26,6 +28,41 @@ struct TraceView: View {
         }
         .navigationTitle(session?.project.title ?? "Trace")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let session {
+                ToolbarItem(placement: .principal) {
+                    // The title doubles as the rename control: tapping the
+                    // drawing's name is where people reach for it first.
+                    Button {
+                        draftTitle = session.project.title
+                        renaming = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(session.project.title)
+                                .font(.headline)
+                                .lineLimit(1)
+                            Image(systemName: "pencil")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("renameTitleButton")
+                    .accessibilityHint("Rename this drawing")
+                }
+            }
+        }
+        .alert("Rename Drawing", isPresented: $renaming) {
+            TextField("Name", text: $draftTitle)
+                .autocorrectionDisabled()
+                .accessibilityIdentifier("renameField")
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                try? session?.rename(to: trimmed)
+            }
+        }
         .task {
             guard session == nil,
                   let project = store.projects.first(where: { $0.id == projectID }) else { return }
@@ -112,6 +149,11 @@ struct TraceView: View {
                     sliderRow("Smoothing", value: $session.outlineSmoothness, tint: .red)
                 }
                 sectionHeader("Engrave", tint: .blue)
+                // Threshold comes first because it acts first: it decides
+                // what the photo is even read as ink, and the two below only
+                // choose among what it found. Turning it up is the only way
+                // to bring out faint engraving marks.
+                sliderRow("Threshold", value: $session.threshold, tint: .blue)
                 sliderRow("Detail", value: $session.detail, tint: .blue)
                 sliderRow("Smoothing", value: $session.smoothness, tint: .blue)
             }
@@ -229,17 +271,19 @@ struct TraceView: View {
                 }
             }
         }
-        ToolbarItem(placement: .secondaryAction) {
-            // Run (or redo) SAM subject selection on this stored drawing —
-            // the only way a cut outline comes into existence.
+        ToolbarItem(placement: .navigation) {
+            // Getting back to the photo to re-select the subject is a main
+            // move, not a menu item: buried in the overflow it read as if
+            // the original drawing had been thrown away once traced.
             Button {
                 path.append(.refineMask(projectID: projectID))
             } label: {
                 Label(
-                    session.hasSubjectMask ? "Redo Outline" : "Select Subject",
-                    systemImage: "person.and.background.dotted"
+                    session.hasSubjectMask ? "Redo Selection" : "Select Subject",
+                    systemImage: "photo.badge.checkmark"
                 )
             }
+            .accessibilityIdentifier("reselectSubjectButton")
         }
         ToolbarItem(placement: .secondaryAction) {
             versionsMenu(session)

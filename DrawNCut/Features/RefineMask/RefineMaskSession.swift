@@ -73,6 +73,12 @@ final class RefineMaskSession {
             return
         }
         image = cgImage
+        // Coming back to an already-selected drawing resumes that selection.
+        // Starting blank made the previous work look discarded, and the only
+        // way forward was to redo every tap.
+        points = (project.maskPrompts ?? []).map {
+            (SIMD2($0.x * Double(cgImage.width), $0.y * Double(cgImage.height)), $0.isSubject)
+        }
         do {
             guard let directory = Self.modelsDirectory else {
                 throw SAM2SegmenterError.modelNotFound(
@@ -84,6 +90,10 @@ final class RefineMaskSession {
             phase = .encoding
             try await segmenter.encode(image: cgImage)
             phase = .ready
+            // Redecode rather than reading mask.png back: the restored taps
+            // are the editable state, and the mask must agree with them or
+            // the next tap would jump to a different selection.
+            if !points.isEmpty { refreshMask() }
         } catch {
             phase = .failed("Subject selection isn't available: \(error)")
         }
@@ -226,16 +236,28 @@ final class RefineMaskSession {
 
     // MARK: - Output
 
-    /// Persists the current mask as the project's `mask.png`.
+    /// Persists the current mask as the project's `mask.png`, together with
+    /// the taps that produced it so this screen can resume from them.
     func saveMask() throws {
-        guard let mask else { return }
+        guard let mask, let image else { return }
         try MaskPNG.write(mask, to: store.maskURL(for: project))
+        try store.saveMaskPrompts(
+            points.map {
+                MaskPrompt(
+                    x: $0.point.x / Double(image.width),
+                    y: $0.point.y / Double(image.height),
+                    isSubject: $0.isSubject
+                )
+            },
+            in: project
+        )
     }
 
     /// The "Trace Everything" path must also forget any previously saved
     /// mask, or the trace screen would silently keep honoring it.
     func discardSavedMask() {
         try? FileManager.default.removeItem(at: store.maskURL(for: project))
+        try? store.saveMaskPrompts([], in: project)
     }
 
     // MARK: - Helpers

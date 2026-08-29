@@ -90,12 +90,18 @@ enum TraceEngine {
     ///   - eraseMask: optional erase mask (same dimensions); ink inside it
     ///     is dropped before analysis, so erased marks cannot re-trace.
     ///   - detail: the single user-facing slider, 0...1.
+    ///   - threshold: how dark a mark must be to register as ink, 0...1.
+    ///     Unlike detail, this decides what binarization *sees* — it is the
+    ///     only control that can recover faint engraving marks the raster
+    ///     stage would otherwise never hand downstream.
     static func trace(
         image: CGImage, mask: BinaryBitmap? = nil, eraseMask: BinaryBitmap? = nil,
-        detail: Double, smoothness: Double = TraceParameters.defaultSmoothness
+        detail: Double, smoothness: Double = TraceParameters.defaultSmoothness,
+        threshold: Double = BinaryBitmap.defaultThreshold
     ) -> TraceResult? {
         var report: BinarizationReport?
-        guard var bitmap = BinaryBitmap(cgImage: image, report: &report) else { return nil }
+        guard var bitmap = BinaryBitmap(cgImage: image, threshold: threshold, report: &report)
+        else { return nil }
         if let mask {
             bitmap.intersect(mask)
         }
@@ -107,7 +113,11 @@ enum TraceEngine {
         let diagonal = (w * w + h * h).squareRoot()
         let parameters = TraceParameters.from(
             detail: detail, smoothness: smoothness, imageDiagonal: diagonal)
-        let elements = trace(bitmap: bitmap, parameters: parameters)
+        // A subject mask means the user has already said what the drawing
+        // is, which changes what the background heuristics below may throw
+        // away.
+        let elements = trace(bitmap: bitmap, parameters: parameters,
+                             isSubjectMasked: mask != nil)
         return TraceResult(
             elements: elements,
             imageSize: CGSize(width: bitmap.width, height: bitmap.height),
@@ -116,22 +126,57 @@ enum TraceEngine {
         )
     }
 
-    static func trace(bitmap: BinaryBitmap, parameters: TraceParameters) -> [TracedElement] {
+    /// Above this fill ratio inside its own bounding box, a component is a
+    /// solid region — mis-thresholded background, a shadow, a filled area —
+    /// rather than pen work. Line drawings stay far below it however busy
+    /// they get: a page-filling scribble measures around 0.15.
+    private static let solidFillDensity = 0.35
+
+    /// Thinning scales with area × stroke thickness. Sparse ink is cheap
+    /// however far it ranges, but past this share of the frame the risk of a
+    /// multi-minute stall outweighs any drawing that large.
+    private static let maskedAreaCeiling = 0.4
+
+    /// - Parameter isSubjectMasked: true when the caller already confined the
+    ///   bitmap to a user-chosen subject.
+    static func trace(
+        bitmap: BinaryBitmap, parameters: TraceParameters, isSubjectMasked: Bool = false
+    ) -> [TracedElement] {
         let components = bitmap.inkComponents(minArea: parameters.speckleMinArea)
         let imagePixels = bitmap.width * bitmap.height
         let diagonal = (Double(bitmap.width * bitmap.width) + Double(bitmap.height * bitmap.height)).squareRoot()
         return components.compactMap { component in
-            // A drawn mark never spans (nearly) the whole frame in both
-            // directions at once; a component that does is mis-thresholded
-            // background, not pen work.
-            if 10 * component.size.width > 8 * bitmap.width,
-               10 * component.size.height > 8 * bitmap.height {
-                return nil
+            let boxPixels = component.size.width * component.size.height
+            let density = boxPixels > 0 ? Double(component.area) / Double(boxPixels) : 1
+
+            if isSubjectMasked {
+                // The user drew the subject boundary themselves, so there is
+                // no background left to reject and a drawing that fills its
+                // own selection is the expected input. Applying the unmasked
+                // rules here dropped exactly that case: every complex
+                // page-filling drawing traced to nothing after the user's
+                // +/- selection, and the screen said "Nothing to Trace".
+                // What remains is the cost guard, and only a genuinely solid
+                // region is expensive to thin.
+                if Double(component.area) > maskedAreaCeiling * Double(imagePixels) {
+                    return nil
+                }
+                if 10 * component.area > imagePixels, density > solidFillDensity {
+                    return nil
+                }
+            } else {
+                // A drawn mark never spans (nearly) the whole frame in both
+                // directions at once; a component that does is mis-thresholded
+                // background, not pen work.
+                if 10 * component.size.width > 8 * bitmap.width,
+                   10 * component.size.height > 8 * bitmap.height {
+                    return nil
+                }
+                // Thinning cost grows with area × thickness — a tenth of the
+                // frame's pixels is already far beyond any dense scribble, and
+                // skeletonizing a background-sized blob stalls for minutes.
+                if 10 * component.area > imagePixels { return nil }
             }
-            // Thinning cost grows with area × thickness — a tenth of the
-            // frame's pixels is already far beyond any dense scribble, and
-            // skeletonizing a background-sized blob stalls for minutes.
-            if 10 * component.area > imagePixels { return nil }
             return element(for: component, parameters: parameters, imageDiagonal: diagonal)
         }
     }

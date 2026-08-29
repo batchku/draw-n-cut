@@ -17,6 +17,9 @@ struct TraceSnapshot: Codable {
     var outlineDetail: Double? = nil
     var outlineSmoothness: Double? = nil
     var smoothness: Double? = nil
+    /// The binarization Threshold slider. Absent in versions saved before it
+    /// existed, which were all made at `BinaryBitmap.defaultThreshold`.
+    var threshold: Double? = nil
     /// Legacy format: cut-promotion taps as [x, y], in tap order. Still
     /// decoded — each surviving tap converts into a frozen promotion once,
     /// against the restored trace.
@@ -124,6 +127,13 @@ final class TraceSession {
     /// decides what survives.
     var smoothness: Double = TraceParameters.defaultSmoothness {
         didSet { if oldValue != smoothness { scheduleRetrace(debounce: true) } }
+    }
+    /// How dark a mark must be to register as ink at all. The other sliders
+    /// choose among the marks binarization already found; this one changes
+    /// what it finds, so it is the only way to recover faint engraving
+    /// detail — and the only one whose change re-runs binarization.
+    var threshold: Double = BinaryBitmap.defaultThreshold {
+        didSet { if oldValue != threshold { scheduleRetrace(debounce: true) } }
     }
     /// Fidelity of the cut outline to the mask boundary: 1 follows every
     /// bump the segmenter saw, 0 is a heavily simplified silhouette.
@@ -246,6 +256,7 @@ final class TraceSession {
         retraceTask?.cancel()
         let detail = detail
         let smoothness = smoothness
+        let threshold = threshold
         let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
@@ -264,7 +275,8 @@ final class TraceSession {
                     from: shapes, width: Int(traceSpace.width), height: Int(traceSpace.height))
                 guard let traced = TraceEngine.trace(
                     image: image, mask: mask, eraseMask: eraseMask,
-                    detail: detail, smoothness: smoothness) else { return nil }
+                    detail: detail, smoothness: smoothness,
+                    threshold: threshold) else { return nil }
                 let classification = ElementClassifier.classify(traced)
                 let suggestions = NonSubjectDetector.suggestions(
                     for: classification,
@@ -404,7 +416,7 @@ final class TraceSession {
         }
         let polylineCount = traced.elements.reduce(0) { $0 + $1.polylines.count }
         TraceLog.log(
-            "traced detail=\(String(format: "%.2f", detail)) smooth=\(String(format: "%.2f", smoothness)) → \(traced.elements.count) elements, \(polylineCount) polylines, \(suggestionCount) suggestions | \(binarization)",
+            "traced detail=\(String(format: "%.2f", detail)) smooth=\(String(format: "%.2f", smoothness)) thresh=\(String(format: "%.2f", threshold)) → \(traced.elements.count) elements, \(polylineCount) polylines, \(suggestionCount) suggestions | \(binarization)",
             file: diagnosticsURL
         )
         let visiblePolylines = visible.map(\.polyline)
@@ -896,6 +908,15 @@ final class TraceSession {
         scheduleRetrace(debounce: false)
     }
 
+    // MARK: - Naming
+
+    /// Renames the drawing and refreshes the local copy so the title in the
+    /// navigation bar updates immediately.
+    func rename(to title: String) throws {
+        try store.rename(project, to: title)
+        syncProject()
+    }
+
     // MARK: - Versions
 
     func saveVersion() throws {
@@ -903,6 +924,7 @@ final class TraceSession {
             detail: detail, eraseShapes: eraseShapes, outlineDetail: outlineDetail,
             outlineSmoothness: outlineSmoothness,
             smoothness: smoothness,
+            threshold: threshold,
             promotedCuts: promotedCuts.map { polyline in
                 SnapshotPolyline(
                     points: polyline.points.map { [$0.x, $0.y] },
@@ -950,6 +972,7 @@ final class TraceSession {
         // what is now its default. Setting these may each schedule a retrace,
         // but scheduling cancels the previous task, so only one trace runs.
         smoothness = snapshot.smoothness ?? TraceParameters.defaultSmoothness
+        threshold = snapshot.threshold ?? BinaryBitmap.defaultThreshold
         if let frozen = snapshot.promotedCuts {
             // Frozen promotions restore as exact geometry — no tap replay.
             promotedCuts = frozen.compactMap { saved in

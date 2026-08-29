@@ -79,3 +79,52 @@ struct ProjectStoreTests {
         #expect(store.projects.isEmpty)
     }
 }
+
+/// Renaming and resuming a subject selection: the drawing keeps its identity
+/// and its selection markers across visits.
+@MainActor
+struct ProjectIdentityTests {
+    private func store() throws -> (ProjectStore, URL) {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "Identity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (ProjectStore(rootURL: root), root)
+    }
+
+    @Test func renamePersistsAndKeepsTheSameFolder() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = try store.create(title: "Drawing 1")
+        let folder = store.directory(for: project)
+
+        try store.rename(project, to: "Deer in the Woods")
+
+        #expect(store.projects.first?.title == "Deer in the Woods")
+        #expect(store.directory(for: project) == folder, "renaming must not move files")
+        let reloaded = ProjectStore(rootURL: root)
+        try reloaded.loadAll()
+        #expect(reloaded.projects.first?.title == "Deer in the Woods")
+    }
+
+    @Test func maskPromptsRoundTripAndClearOnTraceEverything() throws {
+        let (store, root) = try store()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let project = try store.create(title: "Fish")
+
+        let prompts = [
+            MaskPrompt(x: 0.5, y: 0.25, isSubject: true),
+            MaskPrompt(x: 0.1, y: 0.9, isSubject: false),
+        ]
+        try store.saveMaskPrompts(prompts, in: project)
+
+        let reloaded = ProjectStore(rootURL: root)
+        try reloaded.loadAll()
+        #expect(reloaded.projects.first?.maskPrompts == prompts)
+
+        // "Trace Everything" abandons the selection, so the markers must go
+        // too — otherwise reopening the screen would resurrect a selection
+        // the user just discarded.
+        try store.saveMaskPrompts([], in: try #require(store.projects.first))
+        #expect(store.projects.first?.maskPrompts == nil)
+    }
+}

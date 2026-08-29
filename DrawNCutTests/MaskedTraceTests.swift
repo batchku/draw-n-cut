@@ -372,3 +372,60 @@ struct MaskedTraceTests {
         #expect(session.promotedCuts == recorded)
     }
 }
+
+/// Regression: a complex drawing that fills the page traces to *something*
+/// once the user has selected it. Reported from the device — after a careful
+/// +/- subject selection on a busy drawing, the trace screen still said
+/// "Nothing to Trace".
+struct ComplexMaskedDrawingTests {
+
+    /// One connected, page-filling scribble: many strokes, all touching, so
+    /// they collapse into a single ink component whose bounding box spans
+    /// nearly the whole frame — the exact shape the background rejection
+    /// heuristics were written to throw away.
+    static func denseConnectedDrawing(size: Int) -> CGImage {
+        TestCanvas.image(size: size) { ctx in
+            ctx.setLineWidth(4)
+            let margin = Double(size) * 0.04
+            let span = Double(size) - 2 * margin
+            // A serpentine that reaches all four edges, crossed by verticals
+            // so every stroke is connected to every other.
+            let rows = 14
+            ctx.move(to: CGPoint(x: margin, y: margin))
+            for row in 0...rows {
+                let y = margin + span * Double(row) / Double(rows)
+                let startX = row.isMultiple(of: 2) ? margin : margin + span
+                let endX = row.isMultiple(of: 2) ? margin + span : margin
+                ctx.move(to: CGPoint(x: startX, y: y))
+                ctx.addLine(to: CGPoint(x: endX, y: y))
+            }
+            for column in 0...6 {
+                let x = margin + span * Double(column) / 6
+                ctx.move(to: CGPoint(x: x, y: margin))
+                ctx.addLine(to: CGPoint(x: x, y: margin + span))
+            }
+            ctx.strokePath()
+        }
+    }
+
+    @Test func pageFillingDrawingSurvivesItsOwnSubjectMask() throws {
+        let size = 600
+        let image = Self.denseConnectedDrawing(size: size)
+        let traceSpace = BinaryBitmap.traceSize(for: image)
+        let w = Int(traceSpace.width), h = Int(traceSpace.height)
+
+        // The mask the user's +/- taps would produce: the drawing's own
+        // region, which here is essentially the whole page.
+        var mask = BinaryBitmap(width: w, height: h)
+        let inset = Int(Double(w) * 0.02)
+        for y in inset..<(h - inset) {
+            for x in inset..<(w - inset) { mask[x, y] = true }
+        }
+
+        let result = try #require(
+            TraceEngine.trace(image: image, mask: mask, detail: 0.7))
+        #expect(!result.elements.isEmpty, "the selected drawing traced to nothing")
+        let polylines = result.elements.flatMap(\.polylines)
+        #expect(polylines.count >= 10, "got \(polylines.count) polylines")
+    }
+}

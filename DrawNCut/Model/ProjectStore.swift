@@ -74,6 +74,24 @@ final class ProjectStore {
         projects.sort { $0.updatedAt > $1.updatedAt }
     }
 
+    /// Renames a project. The folder is keyed by id, so the title is pure
+    /// metadata and nothing on disk moves.
+    @discardableResult
+    func rename(_ project: DrawingProject, to title: String) throws -> DrawingProject {
+        var project = project
+        project.title = title
+        try save(project)
+        return project
+    }
+
+    /// Records the subject-selection markers so returning to the refine
+    /// screen resumes the selection instead of starting from a blank photo.
+    func saveMaskPrompts(_ prompts: [MaskPrompt], in project: DrawingProject) throws {
+        var project = project
+        project.maskPrompts = prompts.isEmpty ? nil : prompts
+        try save(project)
+    }
+
     func delete(_ project: DrawingProject) throws {
         try FileManager.default.removeItem(at: directory(for: project))
         projects.removeAll { $0.id == project.id }

@@ -138,3 +138,73 @@ struct TraceEngineTests {
         #expect(anchored.smoothingPasses == 1)
     }
 }
+
+/// The Threshold slider: it changes what binarization *sees*, which is the
+/// only stage that can recover faint marks.
+struct InkThresholdTests {
+
+    @Test func thresholdDefaultReproducesTheFixedBehavior() {
+        let gate = InkThreshold(slider: BinaryBitmap.defaultThreshold)
+        #expect(gate.minContrast == 25, "the default must trace exactly as before")
+        #expect(gate.darkCutPercent == 60)
+    }
+
+    @Test func thresholdMapsMonotonically() {
+        var previousContrast = Int64.max
+        var previousCut = Int64.min
+        for step in 0...10 {
+            let gate = InkThreshold(slider: Double(step) / 10)
+            #expect(gate.minContrast <= previousContrast, "contrast must relax as the slider rises")
+            #expect(gate.darkCutPercent >= previousCut, "the ink cut must widen as the slider rises")
+            previousContrast = gate.minContrast
+            previousCut = gate.darkCutPercent
+        }
+        #expect(InkThreshold(slider: 0).minContrast == 50)
+        #expect(InkThreshold(slider: 1).minContrast == 6)
+    }
+
+    /// The point of the slider: a stroke too faint to register at the default
+    /// comes back when Threshold is raised, and the raise is what does it —
+    /// no Detail setting can recover a mark binarization never found.
+    @Test func raisingThresholdRecoversAFaintStroke() throws {
+        let image = TestCanvas.image(size: 300) { ctx in
+            // Bold mark: always found, so the comparison isn't "empty vs not".
+            ctx.setStrokeColor(gray: 0, alpha: 1)
+            ctx.setLineWidth(6)
+            ctx.move(to: CGPoint(x: 40, y: 60))
+            ctx.addLine(to: CGPoint(x: 260, y: 60))
+            ctx.strokePath()
+            // Faint mark: a light pencil line, the engraving detail case.
+            // 0.93 gray sits ~18 levels under the paper — below the default
+            // 25-level contrast gate, above the 6-level floor the slider's
+            // top end reaches. That gap is exactly what Threshold buys.
+            ctx.setStrokeColor(gray: 0.93, alpha: 1)
+            ctx.setLineWidth(6)
+            ctx.move(to: CGPoint(x: 40, y: 220))
+            ctx.addLine(to: CGPoint(x: 260, y: 220))
+            ctx.strokePath()
+        }
+
+        func inkNear(y target: Double, threshold: Double) throws -> Int {
+            let bitmap = try #require(BinaryBitmap(cgImage: image, threshold: threshold))
+            let scale = Double(bitmap.height) / 300
+            let row = Int(target * scale)
+            var count = 0
+            for y in max(0, row - 8)...min(bitmap.height - 1, row + 8) {
+                for x in 0..<bitmap.width where bitmap[x, y] { count += 1 }
+            }
+            return count
+        }
+
+        // CGContext y is flipped relative to the bitmap; the faint stroke
+        // drawn at y=220 lands near y=80 in image space.
+        let faintDefault = try inkNear(y: 80, threshold: BinaryBitmap.defaultThreshold)
+        let faintRaised = try inkNear(y: 80, threshold: 1.0)
+        let boldRaised = try inkNear(y: 240, threshold: 1.0)
+
+        #expect(boldRaised > 0, "the bold stroke must survive at any threshold")
+        #expect(faintDefault == 0, "this stroke is meant to be invisible by default, got \(faintDefault)")
+        #expect(faintRaised > 0,
+                "raising Threshold must find the faint stroke (\(faintDefault) → \(faintRaised))")
+    }
+}

@@ -17,10 +17,47 @@ struct BinarizationReport: Sendable {
     var paperEdgeSharpness: Double = 0
 }
 
+/// How hard binarization works to call a pixel ink, derived from the
+/// user-facing Threshold slider. Both knobs move together because they answer
+/// the same question from two sides: `minContrast` decides whether a window
+/// holds a mark at all, `darkCutPercent` decides how much of that mark's
+/// cross-section survives. Turning only the first one up finds faint strokes
+/// and then perforates them.
+struct InkThreshold: Equatable {
+    /// Gray levels a window's mean-to-minimum spread must reach before
+    /// anything in it can be ink.
+    var minContrast: Int64
+    /// Where the ink cut sits between the window mean (background) and the
+    /// window minimum (the pen), in percent of that span.
+    var darkCutPercent: Int64
+
+    /// - Parameter slider: 0 keeps only bold, high-contrast marks; 1 reaches
+    ///   for the faintest pencil. Piecewise-linear through the midpoint,
+    ///   which reproduces the fixed 25 / 60% behavior this replaced — so an
+    ///   untouched slider traces exactly as before.
+    init(slider: Double) {
+        let t = max(0, min(1, slider))
+        func through(_ strict: Double, _ anchor: Double, _ permissive: Double) -> Int64 {
+            let value = t <= 0.5 ? strict + (anchor - strict) * (t / 0.5)
+                                 : anchor + (permissive - anchor) * ((t - 0.5) / 0.5)
+            return Int64(value.rounded())
+        }
+        // 50 rejects everything but confident pen work; 6 is close to the
+        // sensor-noise floor, which is the point of the far end.
+        minContrast = through(50, 25, 6)
+        // Past ~80% the cut starts swallowing the paper next to a stroke,
+        // which fuses neighboring lines into blobs.
+        darkCutPercent = through(45, 60, 78)
+    }
+}
+
 /// A 1-bit ink bitmap: `true` means ink. The raster substrate for tracing —
 /// built from a photo by grayscale conversion + local adaptive thresholding,
 /// then carved into connected components that become traced elements.
 struct BinaryBitmap {
+    /// The Threshold slider's default: the fixed behavior that predates it.
+    static let defaultThreshold = 0.5
+
     let width: Int
     let height: Int
     var pixels: [Bool]
@@ -66,14 +103,17 @@ struct BinaryBitmap {
     /// paper-vs-table and the whole table becomes "ink".)
     /// Downscales so the long edge is at most `maxDimension` — trace quality
     /// doesn't improve past that, and every later stage is O(pixels).
-    init?(cgImage: CGImage, maxDimension: Int = 2000) {
+    init?(cgImage: CGImage, maxDimension: Int = 2000, threshold: Double = Self.defaultThreshold) {
         var report: BinarizationReport? = nil
-        self.init(cgImage: cgImage, maxDimension: maxDimension, report: &report)
+        self.init(cgImage: cgImage, maxDimension: maxDimension, threshold: threshold, report: &report)
     }
 
     /// Same as `init?(cgImage:maxDimension:)`, but also fills `report` with
     /// the decisions made (nil only when the image itself fails to render).
-    init?(cgImage: CGImage, maxDimension: Int = 2000, report: inout BinarizationReport?) {
+    /// - Parameter threshold: the user-facing Threshold slider, 0...1.
+    ///   `defaultThreshold` reproduces the fixed behavior this replaced.
+    init?(cgImage: CGImage, maxDimension: Int = 2000,
+          threshold: Double = Self.defaultThreshold, report: inout BinarizationReport?) {
         let size = Self.traceSize(for: cgImage, maxDimension: maxDimension)
         let w = Int(size.width)
         let h = Int(size.height)
@@ -94,11 +134,11 @@ struct BinaryBitmap {
 
         // Window ≈ 1/14 of the long edge: wider than any pen stroke (so a
         // stroke never fills its own window), narrower than lighting changes.
-        // The contrast gate is the minimum darkness a mark needs against its
-        // surroundings; 25 gray levels keeps soft pencil while rejecting
-        // sensor noise and shadow gradients.
         let window = max(15, max(w, h) / 14)
-        var ink = Self.locallyDarkMask(gray: gray, width: w, height: h, window: window, minContrast: 25)
+        let gate = InkThreshold(slider: threshold)
+        var ink = Self.locallyDarkMask(
+            gray: gray, width: w, height: h, window: window,
+            minContrast: gate.minContrast, darkCutPercent: gate.darkCutPercent)
 
         // A handheld photo has content only on the paper; whatever the local
         // threshold picked up around it (the paper's own contrast edge, table
@@ -121,20 +161,21 @@ struct BinaryBitmap {
         report = diagnostics
     }
 
-    /// Pixels darker than a cut 60% of the way from the local window mean
-    /// (≈ the background, since marks are thin) down to the darkest value in
-    /// the window (≈ the pen). That cut approximates what a global Otsu
-    /// picks on a clean scan — the window minimum sits below the ink class
-    /// mean, so a plain 50% midpoint runs stricter than Otsu and perforates
-    /// faint stroke segments. Computing it per-window instead of globally is
-    /// what survives arbitrary backgrounds. Windows whose mean-to-minimum
-    /// contrast stays under `minContrast` hold no mark at all and yield
-    /// nothing.
+    /// Pixels darker than a cut `darkCutPercent` of the way from the local
+    /// window mean (≈ the background, since marks are thin) down to the
+    /// darkest value in the window (≈ the pen). At the default 60% that cut
+    /// approximates what a global Otsu picks on a clean scan — the window
+    /// minimum sits below the ink class mean, so a plain 50% midpoint runs
+    /// stricter than Otsu and perforates faint stroke segments. Computing it
+    /// per-window instead of globally is what survives arbitrary
+    /// backgrounds. Windows whose mean-to-minimum contrast stays under
+    /// `minContrast` hold no mark at all and yield nothing.
     /// The mean comes from a summed-area table and the minimum from a
     /// separable sliding-window pass, so the whole mask is O(pixels).
     /// Accumulators are Int64: full-resolution gray sums overflow Int32.
     private static func locallyDarkMask(
-        gray: [UInt8], width w: Int, height h: Int, window: Int, minContrast: Int64
+        gray: [UInt8], width w: Int, height h: Int, window: Int,
+        minContrast: Int64, darkCutPercent: Int64
     ) -> [Bool] {
         var integral = [Int64](repeating: 0, count: (w + 1) * (h + 1))
         for y in 0..<h {
@@ -161,7 +202,8 @@ struct BinaryBitmap {
                     - integral[bottom + x0] + integral[top + x0]
                 let darkest = Int64(minimum[y * w + x])
                 guard sum - darkest * count >= minContrast * count else { continue }
-                if 10 * (Int64(gray[y * w + x]) - darkest) * count < 6 * (sum - darkest * count) {
+                if 100 * (Int64(gray[y * w + x]) - darkest) * count
+                    < darkCutPercent * (sum - darkest * count) {
                     ink[y * w + x] = true
                 }
             }
