@@ -55,7 +55,7 @@ struct EditablePath: Equatable {
 }
 
 /// Drives the trace screen: owns the image, re-traces when Detail changes,
-/// applies suggestions and erase taps, and saves/restores versions.
+/// applies erase taps, and saves/restores versions.
 @MainActor
 @Observable
 final class TraceSession {
@@ -84,7 +84,6 @@ final class TraceSession {
     /// re-draw the cut. Moving the Cut sliders reshapes `cutOutlines` only;
     /// it must never flicker blue lines in and out.
     private var referenceOutlines: [Polyline] = []
-    private(set) var suggestionsByTarget: [TargetKey: RemovalReason] = [:]
     private(set) var removedTargets: Set<TargetKey> = []
     /// Traced polylines that just re-draw the cut outline (the figure's own
     /// silhouette stroke). The laser already cuts there; engraving them too
@@ -117,7 +116,6 @@ final class TraceSession {
     /// actual mutation — a drag that grabs nothing never records an undo.
     private var pendingUndoSnapshot: [EditablePath]?
     private(set) var isTracing = false
-    private(set) var suggestionsApplied = false
 
     var detail: Double = 0.7 {
         didSet { if oldValue != detail { scheduleRetrace(debounce: true) } }
@@ -150,11 +148,10 @@ final class TraceSession {
     /// subtracted from the ink before each trace.
     private(set) var eraseShapes: [EraseShape] = []
     /// Undo granularity: each user action (one lasso, one spot, one
-    /// suggestions-Apply) contributes one batch of shapes; undo removes a
+    /// contributes one batch of shapes; undo removes a
     /// whole batch — pressing undo after Apply brings ALL its lines back.
     private var eraseBatchSizes: [Int] = []
 
-    private var textRegions: [CGRect] = []
     private var retraceTask: Task<Void, Never>?
     private var outlineTask: Task<Void, Never>?
 
@@ -182,15 +179,8 @@ final class TraceSession {
         }
         TraceLog.log("loaded \(url.lastPathComponent) → \(cgImage.width)x\(cgImage.height)", file: diagnosticsURL)
         image = cgImage
-        textRegions = []
         await loadMask(for: cgImage)
         scheduleRetrace(debounce: false)
-        // Text detection is slower than tracing; fold results in when ready.
-        let traceSpace = BinaryBitmap.traceSize(for: cgImage)
-        if let regions = try? await TextDetector.textRegions(in: cgImage, scaledTo: traceSpace) {
-            textRegions = regions
-            refreshSuggestions()
-        }
         // Start from the latest saved version when one exists.
         if let latest = project.activeTraceVersion {
             restore(latest)
@@ -257,7 +247,6 @@ final class TraceSession {
         let detail = detail
         let smoothness = smoothness
         let threshold = threshold
-        let regions = textRegions
         let mask = mask
         let shapes = eraseShapes
         let outlines = referenceOutlines
@@ -269,7 +258,7 @@ final class TraceSession {
             guard !Task.isCancelled else { return }
             // Trace, classify, and detect all off the main actor — in a debug
             // build this is seconds of work on a full-page scan.
-            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, [TargetKey: RemovalReason], Set<TargetKey>)? in
+            let computed = await Task.detached(priority: .userInitiated) { () -> (TraceResult, Set<TargetKey>)? in
                 let traceSpace = BinaryBitmap.traceSize(for: image)
                 let eraseMask = EraseMask.bitmap(
                     from: shapes, width: Int(traceSpace.width), height: Int(traceSpace.height))
@@ -277,18 +266,11 @@ final class TraceSession {
                     image: image, mask: mask, eraseMask: eraseMask,
                     detail: detail, smoothness: smoothness,
                     threshold: threshold) else { return nil }
-                let classification = ElementClassifier.classify(traced)
-                let suggestions = NonSubjectDetector.suggestions(
-                    for: classification,
-                    imageSize: traced.imageSize,
-                    textRegions: regions
-                )
                 let coincident = Self.coincidentTargets(in: traced, outlines: outlines)
-                return (traced, Self.targets(for: suggestions, in: traced), coincident)
+                return (traced, coincident)
             }.value
-            guard !Task.isCancelled, let self, let (traced, byTarget, coincident) = computed else { return }
+            guard !Task.isCancelled, let self, let (traced, coincident) = computed else { return }
             self.result = traced
-            self.suggestionsByTarget = byTarget
             self.isTracing = false
             // The mask already excluded every erased region from this trace;
             // per-polyline removals were only instant feedback and would
@@ -313,11 +295,7 @@ final class TraceSession {
             // starts a new one — undo must never resurrect stale geometry.
             self.editUndoStack = []
             self.pendingUndoSnapshot = nil
-            self.logTraceOutcome(traced, suggestionCount: byTarget.count)
-            // Text regions may have landed while this trace was running.
-            if self.textRegions != regions {
-                self.refreshSuggestions()
-            }
+            self.logTraceOutcome(traced)
         }
     }
 
@@ -409,14 +387,14 @@ final class TraceSession {
         store.directory(for: project).appending(path: "diagnostics.log")
     }
 
-    private func logTraceOutcome(_ traced: TraceResult, suggestionCount: Int) {
+    private func logTraceOutcome(_ traced: TraceResult) {
         var binarization = "binarization=?"
         if let report = traced.binarization {
             binarization = "ink=\(report.inkPixelCount) mask=\(report.paperMaskActive ? "on(\(Int(report.paperCoverage * 100))%)" : "off") sep=\(Int(report.otsuClassSeparation)) border=\(Int(report.paperSurroundContrast)) edge=\(Int(report.paperEdgeSharpness))"
         }
         let polylineCount = traced.elements.reduce(0) { $0 + $1.polylines.count }
         TraceLog.log(
-            "traced detail=\(String(format: "%.2f", detail)) smooth=\(String(format: "%.2f", smoothness)) thresh=\(String(format: "%.2f", threshold)) → \(traced.elements.count) elements, \(polylineCount) polylines, \(suggestionCount) suggestions | \(binarization)",
+            "traced detail=\(String(format: "%.2f", detail)) smooth=\(String(format: "%.2f", smoothness)) thresh=\(String(format: "%.2f", threshold)) → \(traced.elements.count) elements, \(polylineCount) polylines | \(binarization)",
             file: diagnosticsURL
         )
         let visiblePolylines = visible.map(\.polyline)
@@ -425,24 +403,6 @@ final class TraceSession {
             imageSize: traced.imageSize,
             to: store.directory(for: project).appending(path: "trace-preview.png")
         )
-    }
-
-    nonisolated private static func targets(for suggestions: [RemovalSuggestion], in result: TraceResult) -> [TargetKey: RemovalReason] {
-        var byTarget: [TargetKey: RemovalReason] = [:]
-        let elementIndexByID = Dictionary(
-            uniqueKeysWithValues: result.elements.enumerated().map { ($1.id, $0) }
-        )
-        for suggestion in suggestions {
-            guard let elementIndex = elementIndexByID[suggestion.elementID] else { continue }
-            if let polylineIndex = suggestion.polylineIndex {
-                byTarget[TargetKey(elementIndex: elementIndex, polylineIndex: polylineIndex)] = suggestion.reason
-            } else {
-                for polylineIndex in result.elements[elementIndex].polylines.indices {
-                    byTarget[TargetKey(elementIndex: elementIndex, polylineIndex: polylineIndex)] = suggestion.reason
-                }
-            }
-        }
-        return byTarget
     }
 
     // MARK: - Cut promotion
@@ -853,58 +813,12 @@ final class TraceSession {
         guard !eraseShapes.isEmpty else { return }
         let batch = eraseBatchSizes.popLast() ?? 1
         eraseShapes.removeLast(min(batch, eraseShapes.count))
-        suggestionsApplied = false
         scheduleRetrace(debounce: false)
     }
 
     func resetErases() {
         eraseShapes.removeAll()
         eraseBatchSizes.removeAll()
-        suggestionsApplied = false
-        scheduleRetrace(debounce: false)
-    }
-
-    /// Recomputes suggestions off-main against the existing trace result
-    /// (used when text regions arrive after the trace).
-    private func refreshSuggestions() {
-        guard let result else { return }
-        let regions = textRegions
-        Task { [weak self] in
-            let byTarget = await Task.detached(priority: .utility) { () -> [TargetKey: RemovalReason] in
-                let classification = ElementClassifier.classify(result)
-                let suggestions = NonSubjectDetector.suggestions(
-                    for: classification,
-                    imageSize: result.imageSize,
-                    textRegions: regions
-                )
-                return Self.targets(for: suggestions, in: result)
-            }.value
-            guard let self else { return }
-            self.suggestionsByTarget = byTarget
-        }
-    }
-
-    /// Accepts every current suggestion by brushing its centerline into the
-    /// erase mask (so it persists across re-traces and into versions).
-    func applySuggestions() {
-        guard let result else { return }
-        var added = 0
-        for key in suggestionsByTarget.keys where !removedTargets.contains(key) {
-            let element = result.elements[key.elementIndex]
-            let polyline = element.polylines[key.polylineIndex]
-            var points = polyline.points
-            if polyline.isClosed, let first = points.first { points.append(first) }
-            guard !points.isEmpty else { continue }
-            // A little wider than the pen so threshold flicker along the
-            // mark can't leave residue, but tight enough to spare neighbors.
-            let radius = max(3, 1.5 * element.estimatedStrokeWidth)
-            eraseShapes.append(.brush(points: points, radius: radius))
-            removedTargets.insert(key)
-            added += 1
-        }
-        // One undo press restores everything this Apply removed.
-        if added > 0 { eraseBatchSizes.append(added) }
-        suggestionsApplied = true
         scheduleRetrace(debounce: false)
     }
 
@@ -1027,23 +941,19 @@ final class TraceSession {
 
     // MARK: - Visible output
 
-    /// Polylines that survive erasure, with any pending suggestion reason.
-    var visible: [(key: TargetKey, polyline: Polyline, suggestion: RemovalReason?)] {
+    /// Polylines that survive erasure.
+    var visible: [(key: TargetKey, polyline: Polyline)] {
         guard let result else { return [] }
-        var output: [(TargetKey, Polyline, RemovalReason?)] = []
+        var output: [(TargetKey, Polyline)] = []
         for (e, element) in result.elements.enumerated() {
             for (p, polyline) in element.polylines.enumerated() {
                 let key = TargetKey(elementIndex: e, polylineIndex: p)
                 guard !removedTargets.contains(key), !outlineTargets.contains(key),
                       !promotedSourceTargets.contains(key) else { continue }
-                output.append((key, polyline, suggestionsByTarget[key]))
+                output.append((key, polyline))
             }
         }
         return output
-    }
-
-    var pendingSuggestionCount: Int {
-        suggestionsByTarget.keys.count { !removedTargets.contains($0) }
     }
 
     // MARK: - Export

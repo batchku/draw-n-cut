@@ -1,8 +1,8 @@
 import SwiftUI
 import simd
 
-/// The trace screen: live preview, the single Detail slider, tap-to-remove,
-/// cleanup suggestions, version history, and DXF export.
+/// The trace screen: live preview, the trace sliders, erase and point
+/// editing, version history, and DXF export.
 struct TraceView: View {
     @Environment(ProjectStore.self) private var store
     @Binding var path: [Route]
@@ -84,12 +84,6 @@ struct TraceView: View {
             TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode,
                         pointEditMode: pointEditMode, brushMode: brushMode)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .top) {
-                    if session.pendingSuggestionCount > 0 && !session.suggestionsApplied
-                        && !pointEditMode && !brushMode {
-                        suggestionBanner(session)
-                    }
-                }
                 .overlay {
                     if session.isTracing {
                         ProgressView("Tracing…")
@@ -111,27 +105,6 @@ struct TraceView: View {
             ExportSheet(session: session)
                 .presentationDetents([.medium])
         }
-    }
-
-    /// These are REMOVAL suggestions from the app's own heuristics (not the
-    /// segmentation model): highlighted lines look like page clutter — an
-    /// enclosing circle, handwriting, edge junk — and the button deletes
-    /// them. The wording must say so; "apply corrections" once read as
-    /// "fix them" and surprised the user when lines vanished.
-    private func suggestionBanner(_ session: TraceSession) -> some View {
-        HStack(spacing: 12) {
-            Label(
-                "\(session.pendingSuggestionCount) highlighted lines look like page clutter",
-                systemImage: "wand.and.stars"
-            )
-            .font(.footnote)
-            Button("Remove", role: .destructive) { session.applySuggestions() }
-                .font(.footnote.bold())
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(.thinMaterial, in: Capsule())
-        .padding(.top, 8)
     }
 
     private func controls(_ session: TraceSession) -> some View {
@@ -465,6 +438,26 @@ private struct TraceCanvas: View {
             .accessibilityElement()
             .accessibilityIdentifier("traceCanvas")
             .accessibilityValue("\(session.visible.count) paths")
+            .overlay(alignment: .bottomTrailing) {
+                // Pan runs far past the screen edges on purpose, so the way
+                // back has to be visible rather than a remembered gesture.
+                if isTransformed {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            zoom = 1
+                            panOffset = .zero
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.down.right.magnifyingglass")
+                            .font(.title3)
+                            .padding(10)
+                            .background(.regularMaterial, in: Circle())
+                    }
+                    .padding(12)
+                    .accessibilityLabel("Recenter")
+                    .accessibilityIdentifier("recenterButton")
+                }
+            }
             .overlay {
                 // One-finger drags are claimed by whichever edit mode is on:
                 // lasso collection for the eraser, point dragging for point
@@ -566,15 +559,15 @@ private struct TraceCanvas: View {
                 } onPan: { delta in
                     panOffset.width += delta.x
                     panOffset.height += delta.y
-                    clampPan(viewport: geometry.size)
+                    settlePan(imageSize: imageSize, viewport: geometry.size)
                 } onPinch: { scaleDelta, centroid in
-                    let newZoom = min(8, max(1, zoom * scaleDelta))
+                    let newZoom = CanvasPan.clampedZoom(zoom * scaleDelta)
                     let applied = newZoom / zoom
                     // Keep the pinch centroid stationary on screen.
                     panOffset.width = centroid.x - (centroid.x - panOffset.width) * applied
                     panOffset.height = centroid.y - (centroid.y - panOffset.height) * applied
                     zoom = newZoom
-                    clampPan(viewport: geometry.size)
+                    settlePan(imageSize: imageSize, viewport: geometry.size)
                 } onTwoFingerTap: {
                     session.undo()
                 } onSingleTap: { location in
@@ -637,12 +630,18 @@ private struct TraceCanvas: View {
                 )
             }
         } else {
+            // Every engrave line is blue, matching the DXF ENGRAVE layer;
+            // red stays reserved for the CUT outline. Nothing is singled out
+            // in a warning colour: the heuristics that used to tint lines
+            // orange, purple or pink were flagging good engraving work as
+            // page clutter, and they never excluded anything from the export
+            // anyway — the highlight only ever read as an error that wasn't
+            // one.
             for item in session.visible {
-                let style = color(for: item.suggestion)
                 context.stroke(
                     path(for: item.polyline, scale: scale, offset: offset),
-                    with: .color(style.color),
-                    lineWidth: style.emphasized ? 3 : 1.5
+                    with: .color(.blue),
+                    lineWidth: 1.5
                 )
             }
         }
@@ -706,15 +705,27 @@ private struct TraceCanvas: View {
         }
     }
 
-    private func clampPan(viewport: CGSize) {
-        if zoom <= 1 {
-            panOffset = .zero
-            return
-        }
-        let minX = viewport.width * (1 - zoom)
-        let minY = viewport.height * (1 - zoom)
-        panOffset.width = min(0, max(minX, panOffset.width))
-        panOffset.height = min(0, max(minY, panOffset.height))
+    /// Pan is free (see `CanvasPan`); this only stops the drawing being lost
+    /// off screen entirely. `panOffset` is expressed relative to the fitted
+    /// position, so it converts to and from the content's on-screen origin.
+    private func settlePan(imageSize: CGSize, viewport: CGSize) {
+        let fit = fitTransform(imageSize: imageSize, into: viewport)
+        let scale = fit.scale * zoom
+        let contentSize = CGSize(
+            width: imageSize.width * scale, height: imageSize.height * scale)
+        let base = CGPoint(x: fit.offset.width * zoom, y: fit.offset.height * zoom)
+        let settled = CanvasPan.settled(
+            contentOrigin: CGPoint(x: base.x + panOffset.width, y: base.y + panOffset.height),
+            contentSize: contentSize,
+            viewport: viewport
+        )
+        panOffset = CGSize(width: settled.x - base.x, height: settled.y - base.y)
+    }
+
+    /// True once the view has been moved or zoomed away from the fitted
+    /// position — pan is unbounded enough that there has to be a way back.
+    private var isTransformed: Bool {
+        zoom != 1 || panOffset != .zero
     }
 
     private func path(for polyline: Polyline, scale: Double, offset: CGSize) -> Path {
@@ -730,17 +741,6 @@ private struct TraceCanvas: View {
         for point in points.dropFirst() { swiftUIPath.addLine(to: point) }
         if polyline.isClosed { swiftUIPath.closeSubpath() }
         return swiftUIPath
-    }
-
-    /// Engrave lines are blue (matching the DXF ENGRAVE layer); red is
-    /// reserved for the CUT outline. Suggestions highlight in warm hues.
-    private func color(for suggestion: RemovalReason?) -> (color: Color, emphasized: Bool) {
-        switch suggestion {
-        case .enclosingLoop: (.orange, true)
-        case .textLike: (.purple, true)
-        case .edgeArtifact: (.pink, true)
-        case nil: (.blue, false)
-        }
     }
 
     private func fitTransform(imageSize: CGSize, into container: CGSize) -> (scale: Double, offset: CGSize) {
