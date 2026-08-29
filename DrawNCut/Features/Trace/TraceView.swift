@@ -15,6 +15,7 @@ struct TraceView: View {
     @State private var eraserMode = false
     @State private var pointEditMode = false
     @State private var brushMode = false
+    @State private var penMode = false
     @State private var renaming = false
     @State private var draftTitle = ""
 
@@ -82,7 +83,8 @@ struct TraceView: View {
     private func content(_ session: TraceSession) -> some View {
         VStack(spacing: 0) {
             TraceCanvas(session: session, showPhoto: showPhoto, eraserMode: eraserMode,
-                        pointEditMode: pointEditMode, brushMode: brushMode)
+                        pointEditMode: pointEditMode, brushMode: brushMode,
+                        penMode: penMode)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .overlay {
                     if session.isTracing {
@@ -130,8 +132,8 @@ struct TraceView: View {
                 sliderRow("Detail", value: $session.detail, tint: .blue)
                 sliderRow("Smoothing", value: $session.smoothness, tint: .blue)
             }
-            .disabled(pointEditMode || brushMode)
-            .opacity(pointEditMode || brushMode ? 0.35 : 1)
+            .disabled(pointEditMode || brushMode || penMode)
+            .opacity(pointEditMode || brushMode || penMode ? 0.35 : 1)
             HStack(spacing: 16) {
                 Toggle(isOn: $pointEditMode) {
                     Text("Points")
@@ -144,6 +146,7 @@ struct TraceView: View {
                     if on {
                         eraserMode = false
                         brushMode = false
+                        penMode = false
                         session.beginPointEditing()
                     }
                 }
@@ -164,6 +167,7 @@ struct TraceView: View {
                     if brushMode {
                         eraserMode = false
                         pointEditMode = false
+                        penMode = false
                         session.beginPointEditing()
                     }
                 } label: {
@@ -173,6 +177,21 @@ struct TraceView: View {
                 }
                 .accessibilityLabel(brushMode ? "Smoothing marker on" : "Smoothing marker off")
                 .accessibilityIdentifier("smoothBrushToggle")
+                Button {
+                    penMode.toggle()
+                    if penMode {
+                        eraserMode = false
+                        pointEditMode = false
+                        brushMode = false
+                        session.beginPointEditing()
+                    }
+                } label: {
+                    Image(systemName: "pencil.tip")
+                        .font(.title2)
+                        .foregroundStyle(penMode ? Color.accentColor : Color.secondary)
+                }
+                .accessibilityLabel(penMode ? "Pen on" : "Pen off")
+                .accessibilityIdentifier("penToggle")
                 Button {
                     eraserMode.toggle()
                     if eraserMode {
@@ -217,6 +236,9 @@ struct TraceView: View {
         }
         if brushMode {
             return "Sweep over jagged lines to smooth • scrub for more"
+        }
+        if penMode {
+            return "Draw over a line to replace that stretch with your stroke"
         }
         if eraserMode {
             return "Circle around things to erase • two-finger tap undoes"
@@ -345,6 +367,7 @@ private struct TraceCanvas: View {
     let eraserMode: Bool
     let pointEditMode: Bool
     let brushMode: Bool
+    let penMode: Bool
 
     @State private var zoom: CGFloat = 1
     @State private var panOffset: CGSize = .zero
@@ -369,8 +392,14 @@ private struct TraceCanvas: View {
     /// Half-width of the smoothing marker (view pt) — a thick pen. Zooming
     /// in narrows it in image space for finer, gentler smoothing.
     private let brushViewRadius: CGFloat = 24
+    /// How far from the pen stroke a point counts as covered. Wider than the
+    /// stroke looks, so following a line roughly still claims all of it.
+    private let penViewRadius: CGFloat = 28
     /// The marker trail while the finger sweeps, in view coordinates.
     @State private var brushViewPoints: [CGPoint] = []
+    /// Where the brushing finger is right now, for the loupe.
+    @State private var brushViewLocation: CGPoint?
+    @State private var penViewPoints: [CGPoint] = []
 
     var body: some View {
         GeometryReader { geometry in
@@ -398,6 +427,17 @@ private struct TraceCanvas: View {
                             lineWidth: 2 * brushViewRadius, lineCap: .round, lineJoin: .round)
                     )
                 }
+                // The pen stroke in flight, drawn as the line it will become.
+                if penViewPoints.count > 1 {
+                    var stroke = Path()
+                    stroke.move(to: penViewPoints[0])
+                    for point in penViewPoints.dropFirst() { stroke.addLine(to: point) }
+                    context.stroke(
+                        stroke,
+                        with: .color(.green),
+                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round)
+                    )
+                }
                 // The lasso being drawn right now (never magnified).
                 if lassoViewPoints.count > 1 {
                     var lasso = Path()
@@ -409,11 +449,24 @@ private struct TraceCanvas: View {
                         style: StrokeStyle(lineWidth: 2, dash: [6, 4])
                     )
                 }
-                // The drag loupe: the finger hides exactly the point being
-                // placed, so a magnified circle floats beside it showing the
-                // point, its surroundings, and the snap ring.
-                if pointEditMode, let dragRef, let finger = dragViewLocation,
-                   let point = session.position(of: dragRef) {
+                // The loupe: the finger covers exactly the work being done,
+                // so a magnified circle floats beside it. Point editing
+                // centres it on the point in hand; the brush and the pen
+                // centre it on the finger itself, which is what they act on.
+                let loupeFocus: (finger: CGPoint, point: SIMD2<Double>)? = {
+                    if pointEditMode, let dragRef, let finger = dragViewLocation,
+                       let point = session.position(of: dragRef) {
+                        return (finger, point)
+                    }
+                    if (brushMode || penMode), let finger = brushViewLocation {
+                        return (finger, SIMD2(
+                            (finger.x - offset.width) / scale,
+                            (finger.y - offset.height) / scale
+                        ))
+                    }
+                    return nil
+                }()
+                if let (finger, point) = loupeFocus {
                     let center = LoupeGeometry.center(finger: finger, viewport: size)
                     let radius = LoupeGeometry.radius
                     let circle = Path(ellipseIn: CGRect(
@@ -466,7 +519,9 @@ private struct TraceCanvas: View {
                 // One-finger drags are claimed by whichever edit mode is on:
                 // lasso collection for the eraser, point dragging for point
                 // editing. Two-finger pan/pinch stays available in both.
-                TouchOverlay(eraserActive: eraserMode || pointEditMode || brushMode) { previous, current in
+                TouchOverlay(
+                    eraserActive: eraserMode || pointEditMode || brushMode || penMode
+                ) { previous, current in
                     let toImage = { (p: CGPoint) in
                         SIMD2(
                             (p.x - offset.width) / scale,
@@ -479,11 +534,19 @@ private struct TraceCanvas: View {
                         // one undo entry, bounded by the gesture.
                         if previous == nil { session.beginEditGesture() }
                         brushViewPoints.append(current)
+                        brushViewLocation = current
                         session.brushSmooth(
                             from: previous.map(toImage),
                             to: toImage(current),
                             radius: brushViewRadius / scale
                         )
+                        return
+                    }
+                    if penMode {
+                        // Collected whole: the replacement only means
+                        // anything once the stroke's full extent is known.
+                        penViewPoints.append(current)
+                        brushViewLocation = current
                         return
                     }
                     if pointEditMode {
@@ -528,7 +591,20 @@ private struct TraceCanvas: View {
                 } onEraseEnd: {
                     if brushMode {
                         brushViewPoints = []
+                        brushViewLocation = nil
                         session.endEditGesture()
+                        return
+                    }
+                    if penMode {
+                        let stroke = penViewPoints.map { point in
+                            SIMD2(
+                                (point.x - offset.width) / scale,
+                                (point.y - offset.height) / scale
+                            )
+                        }
+                        penViewPoints = []
+                        brushViewLocation = nil
+                        session.penReshape(points: stroke, radius: penViewRadius / scale)
                         return
                     }
                     if pointEditMode {
@@ -560,6 +636,18 @@ private struct TraceCanvas: View {
                         session.eraseSpot(at: toImage(point), radius: eraserViewRadius / scale)
                     }
                     lassoViewPoints = []
+                } onEraseCancel: {
+                    // A two-finger gesture began; whatever the nascent stroke
+                    // did is rolled back so zooming never smears the drawing.
+                    brushViewPoints = []
+                    brushViewLocation = nil
+                    penViewPoints = []
+                    lassoViewPoints = []
+                    dragRef = nil
+                    snapRef = nil
+                    snapTweenTask?.cancel()
+                    snapTweenTask = nil
+                    session.cancelEditGesture()
                 } onPan: { delta in
                     panOffset.width += delta.x
                     panOffset.height += delta.y

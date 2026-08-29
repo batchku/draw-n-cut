@@ -42,12 +42,15 @@ struct InkThreshold: Equatable {
                                  : anchor + (permissive - anchor) * ((t - 0.5) / 0.5)
             return Int64(value.rounded())
         }
-        // 50 rejects everything but confident pen work; 6 is close to the
-        // sensor-noise floor, which is the point of the far end.
-        minContrast = through(50, 25, 6)
-        // Past ~80% the cut starts swallowing the paper next to a stroke,
-        // which fuses neighboring lines into blobs.
-        darkCutPercent = through(45, 60, 78)
+        // The ends are deliberately far apart: at the first try the slider
+        // moved so little that it read as doing nothing. 90 rejects all but
+        // heavy confident pen work; 2 is at the sensor-noise floor, which is
+        // the whole point of reaching for the top end on a faint drawing.
+        minContrast = through(90, 25, 2)
+        // At the top the cut swallows the paper right next to a stroke, so
+        // neighbouring lines thicken and can fuse -- acceptable, because that
+        // end exists to drag out marks that otherwise never appear at all.
+        darkCutPercent = through(25, 60, 92)
     }
 }
 

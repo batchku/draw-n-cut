@@ -251,19 +251,20 @@ private struct RefineCanvas: View {
                     eraserActive: false,
                     onErase: { _, _ in },
                     onEraseEnd: {},
+                    onEraseCancel: {},
                     onPan: { delta in
                         panOffset.width += delta.x
                         panOffset.height += delta.y
-                        clampPan(viewport: geometry.size)
+                        settlePan(imageSize: imageSize, viewport: geometry.size)
                     },
                     onPinch: { scaleDelta, centroid in
-                        let newZoom = min(8, max(1, zoom * scaleDelta))
+                        let newZoom = CanvasPan.clampedZoom(zoom * scaleDelta)
                         let applied = newZoom / zoom
                         // Keep the pinch centroid stationary on screen.
                         panOffset.width = centroid.x - (centroid.x - panOffset.width) * applied
                         panOffset.height = centroid.y - (centroid.y - panOffset.height) * applied
                         zoom = newZoom
-                        clampPan(viewport: geometry.size)
+                        settlePan(imageSize: imageSize, viewport: geometry.size)
                     },
                     onTwoFingerTap: {},
                     onSingleTap: { location in
@@ -281,15 +282,21 @@ private struct RefineCanvas: View {
         .background(Color.white)
     }
 
-    private func clampPan(viewport: CGSize) {
-        if zoom <= 1 {
-            panOffset = .zero
-            return
-        }
-        let minX = viewport.width * (1 - zoom)
-        let minY = viewport.height * (1 - zoom)
-        panOffset.width = min(0, max(minX, panOffset.width))
-        panOffset.height = min(0, max(minY, panOffset.height))
+    /// Same free pan as the trace canvas: the photo moves anywhere at any
+    /// zoom, and only cannot be lost off screen. Picking subject points near
+    /// an edge needs the photo pulled well past the middle.
+    private func settlePan(imageSize: CGSize, viewport: CGSize) {
+        let fit = fitTransform(imageSize: imageSize, into: viewport)
+        let scale = fit.scale * zoom
+        let contentSize = CGSize(
+            width: imageSize.width * scale, height: imageSize.height * scale)
+        let base = CGPoint(x: fit.offset.width * zoom, y: fit.offset.height * zoom)
+        let settled = CanvasPan.settled(
+            contentOrigin: CGPoint(x: base.x + panOffset.width, y: base.y + panOffset.height),
+            contentSize: contentSize,
+            viewport: viewport
+        )
+        panOffset = CGSize(width: settled.x - base.x, height: settled.y - base.y)
     }
 
     private var maskDescription: String {

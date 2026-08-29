@@ -159,13 +159,24 @@ struct InkThresholdTests {
             previousContrast = gate.minContrast
             previousCut = gate.darkCutPercent
         }
-        #expect(InkThreshold(slider: 0).minContrast == 50)
-        #expect(InkThreshold(slider: 1).minContrast == 6)
+        #expect(InkThreshold(slider: 0).minContrast == 90)
+        #expect(InkThreshold(slider: 1).minContrast == 2)
     }
 
     /// The point of the slider: a stroke too faint to register at the default
     /// comes back when Threshold is raised, and the raise is what does it —
     /// no Detail setting can recover a mark binarization never found.
+    /// The ends have to be far enough apart to be worth reaching for: the
+    /// first version of this slider was reported as "very subtle".
+    @Test func theSliderEndsAreFarApart() {
+        let low = InkThreshold(slider: 0)
+        let high = InkThreshold(slider: 1)
+        #expect(low.minContrast >= 8 * high.minContrast,
+                "the strict end must demand far more contrast than the permissive one")
+        #expect(high.darkCutPercent - low.darkCutPercent >= 60,
+                "the ink cut barely moves across the slider's range")
+    }
+
     @Test func raisingThresholdRecoversAFaintStroke() throws {
         let image = TestCanvas.image(size: 300) { ctx in
             // Bold mark: always found, so the comparison isn't "empty vs not".

@@ -14,6 +14,9 @@ struct TouchOverlay: UIViewRepresentable {
     var onErase: (CGPoint?, CGPoint) -> Void
     /// The erase stroke lifted — commit whatever was collected.
     var onEraseEnd: () -> Void
+    /// A second finger arrived while a one-finger stroke was barely underway:
+    /// discard that stroke, the gesture was really a zoom or a pan.
+    var onEraseCancel: () -> Void
     var onPan: (CGPoint) -> Void
     var onPinch: (CGFloat, CGPoint) -> Void
     var onTwoFingerTap: () -> Void
@@ -74,6 +77,23 @@ struct TouchOverlay: UIViewRepresentable {
         /// mid-flight. A stray second touch — a stretched palm on a long
         /// drag — must not start panning/zooming the canvas underneath it.
         private var singleCaptureActive = false
+        /// When the one-finger capture began. A second finger arriving within
+        /// `handoverWindow` means the user was starting a two-finger gesture
+        /// all along; arriving later is a palm settling mid-stroke, which must
+        /// not hijack the drawing.
+        private var singleCaptureStart = ContinuousClock.now
+        private static let handoverWindow = Duration.milliseconds(350)
+
+        /// Gives up an in-flight one-finger stroke in favour of the
+        /// two-finger gesture now starting, if it is young enough.
+        private func yieldSingleCaptureIfFresh() -> Bool {
+            guard singleCaptureActive else { return true }
+            guard singleCaptureStart.duration(to: .now) < Self.handoverWindow else { return false }
+            singleCaptureActive = false
+            lastErasePoint = nil
+            parent.onEraseCancel()
+            return true
+        }
         private weak var suppressedPopGesture: UIGestureRecognizer?
 
         init(_ parent: TouchOverlay) { self.parent = parent }
@@ -109,6 +129,7 @@ struct TouchOverlay: UIViewRepresentable {
                 switch recognizer.state {
                 case .began:
                     singleCaptureActive = true
+                    singleCaptureStart = .now
                     lastErasePoint = nil
                     parent.onErase(nil, location)
                     lastErasePoint = location
@@ -138,7 +159,7 @@ struct TouchOverlay: UIViewRepresentable {
         }
 
         @objc func doublePan(_ recognizer: UIPanGestureRecognizer) {
-            guard !singleCaptureActive else { return }
+            guard yieldSingleCaptureIfFresh() else { return }
             guard recognizer.state == .began || recognizer.state == .changed else { return }
             let delta = recognizer.translation(in: recognizer.view)
             recognizer.setTranslation(.zero, in: recognizer.view)
@@ -146,14 +167,14 @@ struct TouchOverlay: UIViewRepresentable {
         }
 
         @objc func pinch(_ recognizer: UIPinchGestureRecognizer) {
-            guard !singleCaptureActive else { return }
+            guard yieldSingleCaptureIfFresh() else { return }
             guard recognizer.state == .began || recognizer.state == .changed else { return }
             parent.onPinch(recognizer.scale, recognizer.location(in: recognizer.view))
             recognizer.scale = 1
         }
 
         @objc func twoFingerTap() {
-            guard !singleCaptureActive else { return }
+            guard yieldSingleCaptureIfFresh() else { return }
             parent.onTwoFingerTap()
         }
 

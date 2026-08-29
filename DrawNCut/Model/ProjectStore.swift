@@ -8,6 +8,7 @@ import Observation
 ///         original.jpg      photo as shot
 ///         rectified.png     perspective-corrected, normalized drawing
 ///         mask.png          SAM subject mask
+///         thumbnail.jpg     photo + traced lines, for the library list
 ///         traces/v<N>.json  vector paths for each trace version
 ///         exports/*.dxf     exported DXFs
 @Observable
@@ -139,6 +140,12 @@ final class ProjectStore {
 
     func rectifiedImageURL(for project: DrawingProject) -> URL {
         directory(for: project).appending(path: "rectified.png")
+    }
+
+    /// The library row's picture: the photo with its traced lines over it.
+    /// Rewritten after each trace, so it always shows the current state.
+    func thumbnailURL(for project: DrawingProject) -> URL {
+        directory(for: project).appending(path: "thumbnail.jpg")
     }
 
     func maskURL(for project: DrawingProject) -> URL {

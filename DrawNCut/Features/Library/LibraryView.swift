@@ -1,3 +1,4 @@
+import ImageIO
 import SwiftUI
 
 /// Home screen: the local library of drawing projects.
@@ -46,7 +47,10 @@ struct LibraryView: View {
         List {
             ForEach(store.projects) { project in
                 NavigationLink(value: Route.trace(projectID: project.id)) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 12) {
+                        ProjectThumbnail(url: store.thumbnailURL(for: project),
+                                         version: project.updatedAt)
+                        VStack(alignment: .leading, spacing: 4) {
                         Text(project.title)
                             .font(.headline)
                         HStack(spacing: 8) {
@@ -59,6 +63,7 @@ struct LibraryView: View {
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .accessibilityIdentifier("projectRow")
@@ -69,6 +74,53 @@ struct LibraryView: View {
                 }
             }
         }
+    }
+}
+
+/// One library row's picture. Loading happens in `.task` rather than in the
+/// row body so scrolling never blocks on disk, and it reloads when the
+/// project changes because the file is rewritten in place at the same URL.
+private struct ProjectThumbnail: View {
+    let url: URL
+    /// Not read, but a change to it re-runs the load: the path is stable, so
+    /// the modification date is what says the picture is stale.
+    let version: Date
+
+    @State private var image: CGImage?
+
+    private static let side: CGFloat = 56
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                // Not "missing" — a drawing traced before thumbnails existed
+                // gets one the next time it is opened.
+                Image(systemName: "scribble.variable")
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: Self.side, height: Self.side)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
+        .accessibilityHidden(true)
+        .task(id: version) {
+            image = await Self.load(url)
+        }
+    }
+
+    private static func load(_ url: URL) async -> CGImage? {
+        await Task.detached(priority: .userInitiated) { () -> CGImage? in
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+            return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 2 * side,
+            ] as CFDictionary)
+        }.value
     }
 }
 

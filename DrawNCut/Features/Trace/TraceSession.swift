@@ -12,7 +12,13 @@ struct TraceSnapshot: Codable {
     var detail: Double
     /// Legacy format: [x, y] or [x, y, radius] hit-test taps. Still decoded
     /// (as brush dots) so old saved versions keep working.
-    var eraseTaps: [[Double]] = []
+    ///
+    /// Optional, like every other field added or retired over time. A
+    /// non-optional property is a *required* key to Swift's synthesized
+    /// decoding even when it has a default, so a snapshot without this key
+    /// failed to decode outright -- and `restore` swallows that with `try?`,
+    /// which would have looked like a saved version quietly refusing to open.
+    var eraseTaps: [[Double]]? = nil
     var eraseShapes: [EraseShape]? = nil
     var outlineDetail: Double? = nil
     var outlineSmoothness: Double? = nil
@@ -115,6 +121,9 @@ final class TraceSession {
     /// Set at gesture start, promoted to the stack on the gesture's first
     /// actual mutation — a drag that grabs nothing never records an undo.
     private var pendingUndoSnapshot: [EditablePath]?
+    /// Whether the gesture in flight has already pushed its pre-state, so a
+    /// cancel knows whether there is anything on the stack to take back.
+    private var gestureApplied = false
     private(set) var isTracing = false
 
     var detail: Double = 0.7 {
@@ -397,6 +406,7 @@ final class TraceSession {
             "traced detail=\(String(format: "%.2f", detail)) smooth=\(String(format: "%.2f", smoothness)) thresh=\(String(format: "%.2f", threshold)) → \(traced.elements.count) elements, \(polylineCount) polylines | \(binarization)",
             file: diagnosticsURL
         )
+        writeThumbnail()
         let visiblePolylines = visible.map(\.polyline)
         TracePreviewRenderer.write(
             polylines: visiblePolylines,
@@ -547,12 +557,27 @@ final class TraceSession {
     /// records nothing.
     func beginEditGesture() {
         pendingUndoSnapshot = editedPaths
+        gestureApplied = false
+    }
+
+    /// Abandons the gesture in flight and puts the geometry back. A two-finger
+    /// zoom necessarily starts as one finger, so the first few milliseconds of
+    /// it look exactly like the start of a brush stroke; when the second
+    /// finger lands, whatever that nascent stroke did has to be undone rather
+    /// than left smeared across the drawing.
+    func cancelEditGesture() {
+        if gestureApplied, let snapshot = editUndoStack.popLast() {
+            editedPaths = snapshot
+        }
+        pendingUndoSnapshot = nil
+        gestureApplied = false
     }
 
     /// Marks the finger-up. A snapshot never promoted (no mutation happened)
     /// is discarded.
     func endEditGesture() {
         pendingUndoSnapshot = nil
+        gestureApplied = false
     }
 
     /// Applies a mutation to the frozen geometry, recording the gesture's
@@ -562,6 +587,7 @@ final class TraceSession {
         if let snapshot = pendingUndoSnapshot {
             editUndoStack.append(snapshot)
             pendingUndoSnapshot = nil
+            gestureApplied = true
         }
         editedPaths = newPaths
     }
@@ -861,6 +887,61 @@ final class TraceSession {
         scheduleRetrace(debounce: false)
     }
 
+    /// Refreshes the library thumbnail off the main actor. Every trace
+    /// rewrites it, so the library always shows the drawing as it stands
+    /// rather than as it was first traced.
+    private func writeThumbnail() {
+        guard let image, let result else { return }
+        let engrave = displayPolylines(cut: false)
+        let cuts = displayPolylines(cut: true)
+        let imageSize = result.imageSize
+        let url = store.thumbnailURL(for: project)
+        Task.detached(priority: .utility) {
+            ThumbnailRenderer.write(
+                photo: image, engrave: engrave, cuts: cuts,
+                imageSize: imageSize, to: url)
+        }
+    }
+
+    /// What the canvas is drawing right now, split by layer — frozen geometry
+    /// when it exists, the live trace otherwise. The thumbnail has to match
+    /// what the user last saw, not the pre-edit trace.
+    private func displayPolylines(cut wantCut: Bool) -> [Polyline] {
+        if let editedPaths {
+            return editedPaths.filter { $0.isCut == wantCut }.map(\.polyline)
+        }
+        return wantCut ? cutOutlines + promotedCuts : visible.map(\.polyline)
+    }
+
+    // MARK: - Pen
+
+    /// How hard the pen stroke itself is simplified before it replaces the
+    /// stretch it covered. Relative to the image so it behaves the same on
+    /// any photo.
+    private var penTolerance: Double {
+        guard let result else { return 2 }
+        return max(1.5, 0.002 * hypot(result.imageSize.width, result.imageSize.height))
+    }
+
+    /// Applies a finished pen stroke: the stretch of the line it followed is
+    /// replaced by the stroke. Unlike the brush this is not live — the
+    /// replacement is only meaningful once the whole stroke is known.
+    func penReshape(points: [SIMD2<Double>], radius: Double) {
+        beginPointEditing()
+        guard let paths = editedPaths, points.count >= 2 else { return }
+        let polylines = paths.map(\.polyline)
+        guard let index = PenReshape.targetIndex(
+                in: polylines, pen: points, radius: radius),
+              let reshaped = PenReshape.reshaped(
+                polylines[index], pen: points, radius: radius, tolerance: penTolerance)
+        else { return }
+        var updated = paths
+        updated[index] = EditablePath(polyline: reshaped, isCut: paths[index].isCut)
+        beginEditGesture()
+        applyEdit(updated, previous: paths)
+        endEditGesture()
+    }
+
     // MARK: - Naming
 
     /// Renames the drawing and refreshes the local copy so the title in the
@@ -909,7 +990,7 @@ final class TraceSession {
         } else {
             // Legacy snapshots stored hit-test taps ([x, y] or [x, y, radius]);
             // a brush dot at the same spot erases the same mark's ink.
-            eraseShapes = snapshot.eraseTaps.compactMap { values in
+            eraseShapes = (snapshot.eraseTaps ?? []).compactMap { values in
                 guard values.count >= 2 else { return nil }
                 let radius = values.count >= 3 ? values[2] : defaultEraserRadius
                 return .brush(points: [SIMD2(values[0], values[1])], radius: radius)
