@@ -360,7 +360,7 @@ final class TraceSession {
         let tolerance = d <= 0.7
             ? 16 + (2.9 - 16) * (d / 0.7)
             : 2.9 + (0.5 - 2.9) * ((d - 0.7) / 0.3)
-        return MaskGeometry.cutContours(
+        let contours = MaskGeometry.cutContours(
             of: mask,
             snappedTo: ink,
             // Big enough to bridge the segmenter's worst wander (measured
@@ -370,6 +370,14 @@ final class TraceSession {
             simplifyTolerance: tolerance,
             smoothingPasses: s < 0.2 ? 0 : s < 0.6 ? 1 : s < 0.85 ? 2 : 3
         )
+        // Snapping onto the drawing's own strokes drags stretches of the
+        // contour sideways, and where two stretches are pulled past each
+        // other the outline knots. Every knot encloses a region the laser
+        // will cut, so the part falls into scraps. Neither slider can undo
+        // it -- simplification is built to *preserve* a feature whose ends
+        // are far apart along the path -- so the crossings are excised as
+        // geometry, after both sliders have had their say.
+        return contours.map { OutlineCleanup.withoutCurls($0) }
     }
 
     /// Recomputes the cut outline when a Cut slider moves. ONLY the red
