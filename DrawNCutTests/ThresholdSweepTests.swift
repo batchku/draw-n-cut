@@ -31,19 +31,16 @@ struct ThresholdSweepTests {
         }
     }
 
-    /// Turning it up must not throw detail away. Exact monotonicity is too
-    /// strong — merging strokes can legitimately reduce the count — but the
-    /// top half collapsing is the reported bug.
-    @Test func raisingThresholdNeverCollapsesTheTrace() throws {
+    /// Every setting must still trace *something*. Fewer lines at the top
+    /// of the range is now the intended behaviour — see
+    /// ThresholdMonotonicTests — but no setting may empty the screen.
+    @Test func noSettingEmptiesTheDrawing() throws {
         let image = try FixtureTraceTests.fixtureImage("fish-photo", extension: "jpg")
         let counts = polylineCounts(in: image)
         let report = counts.map { "\(String(format: "%.1f", $0.threshold)):\($0.count)" }
             .joined(separator: " ")
-        let atMiddle = try #require(counts.first { $0.threshold == 0.5 }).count
-
-        for (threshold, count) in counts where threshold > 0.5 {
-            #expect(count >= atMiddle / 2,
-                    "threshold \(threshold) lost most of the drawing — \(report)")
+        for (threshold, count) in counts {
+            #expect(count > 0, "threshold \(threshold) traced nothing — \(report)")
         }
     }
 

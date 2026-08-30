@@ -69,8 +69,11 @@ struct EngraveCoverageTests {
             }
             ctx.strokePath()
 
-            // Face.
-            ctx.setLineWidth(8)
+            // Face and hatching in a finer, lighter pen than the marker
+            // outline — which is how the real drawing is made, and the only
+            // way a darkness bar has anything to discriminate on.
+            ctx.setStrokeColor(gray: 0.72, alpha: 1)
+            ctx.setLineWidth(5)
             ctx.strokeEllipse(in: CGRect(x: c - 95, y: c + 40, width: 55, height: 55))
             ctx.strokeEllipse(in: CGRect(x: c + 40, y: c + 40, width: 55, height: 55))
             ctx.move(to: CGPoint(x: c, y: c + 30))
@@ -81,7 +84,7 @@ struct EngraveCoverageTests {
             ctx.strokePath()
 
             // Hatching over the body interior, well away from the centre.
-            ctx.setLineWidth(6)
+            ctx.setLineWidth(4)
             for i in 0..<10 {
                 let a = Double(i) / 10 * 2 * .pi
                 let r0 = 120.0, r1 = 185.0
@@ -207,7 +210,9 @@ struct EngraveCoverageTests {
         let high = snapshot("high")
 
         let report = "low=\(low) middle=\(middle) high=\(high)"
-        #expect(low != high, "Threshold does nothing to the engrave lines — \(report)")
-        #expect(high >= middle, "raising Threshold lost detail — \(report)")
+        // A low bar admits the fine pen work as well as the marker; a high
+        // bar keeps only the marker.
+        #expect(low > high, "Threshold does nothing to the engrave lines — \(report)")
+        #expect(low >= middle, "lowering Threshold lost detail — \(report)")
     }
 }

@@ -21,44 +21,41 @@ struct BinarizationReport: Sendable {
     var paperEdgeSharpness: Double = 0
 }
 
-/// How hard binarization works to call a pixel ink, derived from the
-/// user-facing Threshold slider. Both knobs move together because they answer
-/// the same question from two sides: `minContrast` decides whether a window
-/// holds a mark at all, `darkCutPercent` decides how much of that mark's
-/// cross-section survives. Turning only the first one up finds faint strokes
-/// and then perforates them.
+/// The Threshold slider: how dark a mark must be before it counts as ink.
+///
+/// A bar to clear, and nothing else. Low bar, more marks qualify and more
+/// engraving lines come out; high bar, only the boldest survive. That is what
+/// the word means and what the slider now does.
+///
+/// It used to drive two knobs at once — this darkness bar *and* how much of
+/// each stroke's cross-section was kept — running them in opposite
+/// directions. They cancelled: measured across the range, the count went
+/// 44, 39, 38, 39, 38, 60, 70, 72, 168, 257, 321. Flat for the whole bottom
+/// half, then climbing — so the slider read as doing nothing at one end and
+/// as backwards at the other. Stroke thickness is now held at the value the
+/// default always used, and only the bar moves.
 struct InkThreshold: Equatable {
     /// Gray levels a window's mean-to-minimum spread must reach before
-    /// anything in it can be ink.
+    /// anything in it can be ink. This is the bar.
     var minContrast: Int64
-    /// Where the ink cut sits between the window mean (background) and the
-    /// window minimum (the pen), in percent of that span.
-    var darkCutPercent: Int64
 
-    /// - Parameter slider: 0 keeps only bold, high-contrast marks; 1 reaches
-    ///   for the faintest pencil. Piecewise-linear through the midpoint,
-    ///   which reproduces the fixed 25 / 60% behavior this replaced — so an
-    ///   untouched slider traces exactly as before.
+    /// Where the ink cut sits between the window mean (background) and the
+    /// window minimum (the pen), in percent of that span. Fixed: it governs
+    /// how fat a stroke comes out, which is not what "threshold" means, and
+    /// moving it alongside the bar is what made the control incoherent.
+    var darkCutPercent: Int64 { 60 }
+
+    /// - Parameter slider: 0 is the lowest bar — everything short of sensor
+    ///   noise counts, so the most lines. 1 is the highest — only heavy,
+    ///   confident marks. The midpoint is 25 gray levels, the fixed value
+    ///   that predates the slider, so a drawing left at the default traces
+    ///   exactly as it always did.
     init(slider: Double) {
         let t = max(0, min(1, slider))
-        func through(_ strict: Double, _ anchor: Double, _ permissive: Double) -> Int64 {
-            let value = t <= 0.5 ? strict + (anchor - strict) * (t / 0.5)
-                                 : anchor + (permissive - anchor) * ((t - 0.5) / 0.5)
-            return Int64(value.rounded())
-        }
-        // These two are not interchangeable, and pushing both to their
-        // extremes was a mistake. `minContrast` is the sensitivity knob: low
-        // means faint marks register, which is what "more detail" asks for.
-        // `darkCutPercent` is the *thickness* knob: high means more of the
-        // paper beside a stroke counts as ink, so strokes fatten, neighbours
-        // fuse, and past a point the whole page reads as one blob that the
-        // background guards then throw away -- detail going DOWN as the
-        // slider goes up, ending in "Nothing to Trace".
-        //
-        // So the range is wide on sensitivity and deliberately moderate on
-        // thickness.
-        minContrast = through(90, 25, 3)
-        darkCutPercent = through(30, 60, 70)
+        let value = t <= 0.5
+            ? 3 + (25.0 - 3) * (t / 0.5)
+            : 25 + (110.0 - 25) * ((t - 0.5) / 0.5)
+        minContrast = Int64(value.rounded())
     }
 }
 

@@ -180,8 +180,9 @@ struct EditingIntegrationTests {
     // MARK: - Threshold
 
     /// The Threshold slider has to reach the trace, not just the parameters:
-    /// it is the one control that re-runs binarization.
-    @Test func movingThresholdChangesWhatIsTraced() async throws {
+    /// it is the one control that re-runs binarization. Lowering the bar is
+    /// what brings a faint mark in.
+    @Test func loweringThresholdChangesWhatIsTraced() async throws {
         // A drawing with one bold stroke and one faint one.
         let (session, root) = try await session(strokes: { ctx in
             ctx.setLineWidth(6)
@@ -197,12 +198,12 @@ struct EditingIntegrationTests {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let atDefault = session.visible.count
-        session.threshold = 1.0
+        session.threshold = 0.0
         try await session.settle()
-        let atTop = session.visible.count
+        let atLowBar = session.visible.count
 
-        #expect(atTop > atDefault,
-                "raising Threshold found nothing new (\(atDefault) → \(atTop))")
+        #expect(atLowBar > atDefault,
+                "lowering Threshold found nothing new (\(atDefault) → \(atLowBar))")
     }
 
     @Test func thresholdIsSavedAndRestoredWithAVersion() async throws {
