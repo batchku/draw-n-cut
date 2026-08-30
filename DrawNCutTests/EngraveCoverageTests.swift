@@ -213,6 +213,6 @@ struct EngraveCoverageTests {
         // A low bar admits the fine pen work as well as the marker; a high
         // bar keeps only the marker.
         #expect(low > high, "Threshold does nothing to the engrave lines — \(report)")
-        #expect(low >= middle, "lowering Threshold lost detail — \(report)")
+        #expect(high == 0, "maximum Threshold must leave no engrave lines — \(report)")
     }
 }

@@ -132,10 +132,10 @@ enum TraceEngine {
     /// they get: a page-filling scribble measures around 0.15.
     private static let solidFillDensity = 0.35
 
-    /// Thinning scales with area × stroke thickness. Sparse ink is cheap
-    /// however far it ranges, but past this share of the frame the risk of a
-    /// multi-minute stall outweighs any drawing that large.
-    private static let maskedAreaCeiling = 0.4
+    /// Past this share of the frame, a *solid* region is refused under a
+    /// mask: thinning scales with area × stroke thickness, and only a solid
+    /// blob is thick enough for that to stall.
+    private static let maskedSolidCeiling = 0.25
 
     /// - Parameter isSubjectMasked: true when the caller already confined the
     ///   bitmap to a user-chosen subject.
@@ -150,18 +150,14 @@ enum TraceEngine {
             let density = boxPixels > 0 ? Double(component.area) / Double(boxPixels) : 1
 
             if isSubjectMasked {
-                // The user drew the subject boundary themselves, so there is
-                // no background left to reject and a drawing that fills its
-                // own selection is the expected input. Applying the unmasked
-                // rules here dropped exactly that case: every complex
-                // page-filling drawing traced to nothing after the user's
-                // +/- selection, and the screen said "Nothing to Trace".
-                // What remains is the cost guard, and only a genuinely solid
-                // region is expensive to thin.
-                if Double(component.area) > maskedAreaCeiling * Double(imagePixels) {
-                    return nil
-                }
-                if 10 * component.area > imagePixels, density > solidFillDensity {
+                // Only a genuinely solid region is refused. Line work is
+                // never dropped for being large: the user drew the boundary,
+                // so everything inside is the subject, and dropping the one
+                // big component made the trace lurch as Threshold changed
+                // the ink density -- detail vanishing and reappearing rather
+                // than thinning out.
+                if density > Self.solidFillDensity,
+                   Double(component.area) > Self.maskedSolidCeiling * Double(imagePixels) {
                     return nil
                 }
             } else {

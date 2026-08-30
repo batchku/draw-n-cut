@@ -139,42 +139,36 @@ struct TraceEngineTests {
     }
 }
 
-/// The Threshold slider at the raster level. Direction and range are covered
-/// in ThresholdMonotonicTests; this is the mechanism it acts through.
+/// The Threshold slider at the raster level. Its extremes are asserted in
+/// ThresholdExtremesTests; this covers the mechanism it acts through.
 struct InkThresholdTests {
 
-    @Test func thresholdDefaultReproducesTheFixedBehavior() {
-        let gate = InkThreshold(slider: BinaryBitmap.defaultThreshold)
-        #expect(gate.minContrast == 25, "the default must trace exactly as before")
-        #expect(gate.darkCutPercent == 60)
+    @Test func theLowestSettingSitsAtTheDenseEndOfSauvolasRange() {
+        // Just above 0. At exactly the local mean about half of any
+        // photograph qualifies as ink — a filled page, not lines — so the
+        // bottom stops a little short of it while still admitting a faint
+        // pen dot.
+        let k = InkThreshold(slider: 0).k
+        #expect(k > 0 && k <= 0.03, "got k = \(k)")
     }
 
-    /// The bar is what the slider moves: a mark has to be this many gray
-    /// levels darker than its surroundings to count.
-    @Test func theBarRisesMonotonicallyWithTheSlider() {
-        var previous = Int64.min
-        for step in 0...10 {
-            let bar = InkThreshold(slider: Double(step) / 10).minContrast
-            #expect(bar >= previous, "the bar dipped at \(step)")
-            previous = bar
+    @Test func kRisesMonotonicallyWithTheSlider() {
+        var previous = -Double.infinity
+        for step in 0...20 {
+            let k = InkThreshold(slider: Double(step) / 20).k
+            #expect(k >= previous, "k dipped at \(step)")
+            previous = k
         }
-        #expect(InkThreshold(slider: 0).minContrast == 3)
-        #expect(InkThreshold(slider: 1).minContrast == 110)
     }
 
-    /// A faint pencil line is exactly what a low bar is for: it is too light
-    /// to clear the default, and lowering the bar brings it in.
+    /// A faint pencil line is exactly what the low end is for.
     @Test func loweringTheBarRecoversAFaintStroke() throws {
         let image = TestCanvas.image(size: 300) { ctx in
-            // Bold mark: clears any bar, so the comparison is not
-            // "empty vs not".
             ctx.setStrokeColor(gray: 0, alpha: 1)
             ctx.setLineWidth(6)
             ctx.move(to: CGPoint(x: 40, y: 60))
             ctx.addLine(to: CGPoint(x: 260, y: 60))
             ctx.strokePath()
-            // Faint mark: about 18 gray levels under the paper, so it sits
-            // below the default bar of 25 and above the lowest bar of 3.
             ctx.setStrokeColor(gray: 0.93, alpha: 1)
             ctx.setLineWidth(6)
             ctx.move(to: CGPoint(x: 40, y: 220))
@@ -193,14 +187,11 @@ struct InkThresholdTests {
             return count
         }
 
-        // CGContext y is flipped relative to the bitmap: the faint stroke
-        // drawn at y=220 lands near y=80 in image space.
-        let atDefault = try inkNear(y: 80, threshold: BinaryBitmap.defaultThreshold)
-        let atLowBar = try inkNear(y: 80, threshold: 0.0)
-        let boldAtHighBar = try inkNear(y: 240, threshold: 1.0)
-
-        #expect(atDefault == 0, "this stroke is meant to miss the default bar, got \(atDefault)")
-        #expect(atLowBar > 0, "lowering the bar did not find the faint stroke")
-        #expect(boldAtHighBar > 0, "the bold stroke must clear even the highest bar")
+        // CGContext y is flipped: the faint stroke drawn at y=220 lands near
+        // y=80 in image space.
+        let atLowBar = try inkNear(y: 80, threshold: 0)
+        let atHighBar = try inkNear(y: 80, threshold: 0.85)
+        #expect(atLowBar > 0, "the lowest bar did not find the faint stroke")
+        #expect(atLowBar > atHighBar, "the faint stroke did not thin out as the bar rose")
     }
 }

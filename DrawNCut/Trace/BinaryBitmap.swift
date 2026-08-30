@@ -21,56 +21,76 @@ struct BinarizationReport: Sendable {
     var paperEdgeSharpness: Double = 0
 }
 
-/// The Threshold slider: how dark a mark must be before it counts as ink.
+/// The Threshold slider, as a Sauvola binarization parameter.
 ///
-/// A bar to clear, and nothing else. Low bar, more marks qualify and more
-/// engraving lines come out; high bar, only the boldest survive. That is what
-/// the word means and what the slider now does.
+/// Sauvola's method is the standard for exactly this problem — degraded
+/// documents under uneven lighting, which is what a handheld photo of a
+/// drawing on a table is. A pixel is ink when it is darker than a threshold
+/// computed from its own neighbourhood:
 ///
-/// It used to drive two knobs at once — this darkness bar *and* how much of
-/// each stroke's cross-section was kept — running them in opposite
-/// directions. They cancelled: measured across the range, the count went
-/// 44, 39, 38, 39, 38, 60, 70, 72, 168, 257, 321. Flat for the whole bottom
-/// half, then climbing — so the slider read as doing nothing at one end and
-/// as backwards at the other. Stroke thickness is now held at the value the
-/// default always used, and only the bar moves.
+///     T = m · [1 + k·(s/R − 1)]
+///
+/// where `m` and `s` are the local mean and standard deviation and `R` is the
+/// dynamic range of `s`. Everything the slider does is move `k`.
+///
+/// Two properties are why this replaced a hand-rolled rule that had to be
+/// re-tuned every time it was reported broken:
+///
+/// - **Monotonic by construction.** `s` cannot exceed `R`, so the bracket is
+///   never above 1 and `T` falls as `k` rises. More `k` is always less ink.
+///   No tuning can invert it and no image can make it non-monotonic.
+/// - **Both extremes are meaningful, not accidental.** At `k = 0` the
+///   threshold *is* the local mean, so every pixel darker than its
+///   surroundings is ink — a lone pen dot cannot be missed, and paper grain
+///   comes through as noise, which is what the bottom of the slider is for.
+///   Where `k ≥ 1/(1 − s/R)` the threshold falls to zero and nothing can be
+///   ink at all, which is what the top is for.
+///
+/// Reference: J. Sauvola and M. Pietikäinen, "Adaptive document image
+/// binarization", Pattern Recognition 33(2), 2000.
 struct InkThreshold: Equatable {
-    /// Gray levels a window's mean-to-minimum spread must reach before
-    /// anything in it can be ink. This is the bar.
-    var minContrast: Int64
+    /// Sauvola's k. 0 is the lowest possible bar; large values raise it until
+    /// nothing qualifies.
+    var k: Double
 
-    /// Where the ink cut sits between the window mean (background) and the
-    /// window minimum (the pen), in percent of that span.
-    ///
-    /// This moves *with* the bar, in the same direction. Both answer "how
-    /// easily does a pixel become ink", so pointing them the same way makes
-    /// them reinforce. Running them in opposite directions is what made the
-    /// slider incoherent before, not the fact that both move.
-    ///
-    /// It matters most at the low end. The window minimum is set by the
-    /// darkest thing in the window, so a faint pencil line sharing a window
-    /// with a bold marker stroke sits nowhere near that minimum — lowering
-    /// the contrast bar alone will never admit it, because the bar is not
-    /// what rejects it. Widening the cut is.
-    var darkCutPercent: Int64
+    /// Sauvola's R: the dynamic range of the local standard deviation. 128
+    /// for 8-bit grey, which is what makes `s/R ≤ 1` and the method monotone.
+    static let dynamicRange = 128.0
 
-    /// - Parameter slider: 0 is the lowest bar — nearly every mark on the
-    ///   page registers, including the faintest. 1 is the highest — only
-    ///   heavy, confident marks. The midpoint is 25 gray levels at a 60% cut,
-    ///   the fixed pair that predates the slider, so a drawing left at the
-    ///   default traces exactly as it always did.
+    /// Above this the threshold has collapsed to zero even in the
+    /// highest-variance neighbourhood an 8-bit image can produce, so nothing
+    /// at all is ink. The slider's last stretch runs up to it on purpose:
+    /// "all the way up" has to mean no engraving lines, not merely few.
+    static let silentK = 260.0
+
+    /// - Parameter slider: 0 admits everything darker than its surroundings,
+    ///   noise included. 1 admits nothing. In between, the useful range is
+    ///   spread across the lower nine tenths, because past k ≈ 0.8 a drawing
+    ///   is already down to its boldest strokes and the rest would be wasted
+    ///   travel.
     init(slider: Double) {
         let t = max(0, min(1, slider))
-        func through(_ low: Double, _ anchor: Double, _ high: Double) -> Int64 {
-            let value = t <= 0.5 ? low + (anchor - low) * (t / 0.5)
-                                 : anchor + (high - anchor) * ((t - 0.5) / 0.5)
-            return Int64(value.rounded())
+        if t < 0.5 {
+            // 0.02 → 0.20. Not 0: at k = 0 the threshold is exactly the local
+            // mean, which by definition calls about half of every photograph
+            // ink — measured at 43% of the frame, a filled page rather than
+            // lines. 0.02 measures 19%, which is dense with paper grain and
+            // still admits a faint pen dot (it survives to about k = 0.08).
+            // 0.20 is the classic document value and reproduces the look the
+            // fixed threshold had before the slider existed.
+            k = 0.02 + (0.20 - 0.02) * (t / 0.5)
+        } else if t < 0.9 {
+            // 0.20 → 0.80: thinning down to the confident strokes.
+            k = 0.20 + (0.80 - 0.20) * ((t - 0.5) / 0.4)
+        } else if t >= 1 {
+            // Pinned exactly: a geometric ramp lands a hair under its target,
+            // and the top of this slider has to mean silence, not almost.
+            k = Self.silentK
+        } else {
+            // The last tenth is the climb to silence, geometric so it is a
+            // ramp rather than a step at the very end.
+            k = 0.80 * pow(Self.silentK / 0.80, (t - 0.9) / 0.1)
         }
-        minContrast = through(3, 25, 110)
-        // 85 is as wide as the cut can go before the paper beside a stroke
-        // starts counting too and neighbouring lines fuse into a blob; past
-        // that the drawing collapses rather than densifies.
-        darkCutPercent = through(85, 60, 40)
     }
 }
 
@@ -160,10 +180,9 @@ struct BinaryBitmap {
         // Window ≈ 1/14 of the long edge: wider than any pen stroke (so a
         // stroke never fills its own window), narrower than lighting changes.
         let window = max(15, max(w, h) / 14)
-        let gate = InkThreshold(slider: threshold)
-        var ink = Self.locallyDarkMask(
+        var ink = Self.sauvolaMask(
             gray: gray, width: w, height: h, window: window,
-            minContrast: gate.minContrast, darkCutPercent: gate.darkCutPercent)
+            k: InkThreshold(slider: threshold).k)
 
         // A handheld photo has content only on the paper; whatever the local
         // threshold picked up around it (the paper's own contrast edge, table
@@ -180,6 +199,12 @@ struct BinaryBitmap {
         // Faint strokes (screen photos, light pencil) perforate under the
         // local threshold; a radius-1 closing re-bridges those pinholes
         // before the ink is carved into components.
+        // Faint strokes (screen photos, light pencil) perforate under the
+        // local threshold; a radius-1 closing re-bridges those pinholes
+        // before the ink is carved into components. (Radius 2 was tried as
+        // the standard repair for Sauvola's broken mid-range strokes and
+        // moved nothing measurable, so it is not worth the extra weight it
+        // puts on every stroke.)
         let bridged = BinaryBitmap(width: w, height: h, pixels: ink).closed(radius: 1)
         diagnostics.inkPixelCount = bridged.pixels.reduce(into: 0) { if $1 { $0 += 1 } }
         diagnostics.inkFraction = w * h > 0 ? Double(diagnostics.inkPixelCount) / Double(w * h) : 0
@@ -187,103 +212,79 @@ struct BinaryBitmap {
         report = diagnostics
     }
 
-    /// Pixels darker than a cut `darkCutPercent` of the way from the local
-    /// window mean (≈ the background, since marks are thin) down to the
-    /// darkest value in the window (≈ the pen). At the default 60% that cut
-    /// approximates what a global Otsu picks on a clean scan — the window
-    /// minimum sits below the ink class mean, so a plain 50% midpoint runs
-    /// stricter than Otsu and perforates faint stroke segments. Computing it
-    /// per-window instead of globally is what survives arbitrary
-    /// backgrounds. Windows whose mean-to-minimum contrast stays under
-    /// `minContrast` hold no mark at all and yield nothing.
-    /// The mean comes from a summed-area table and the minimum from a
-    /// separable sliding-window pass, so the whole mask is O(pixels).
-    /// Accumulators are Int64: full-resolution gray sums overflow Int32.
-    private static func locallyDarkMask(
-        gray: [UInt8], width w: Int, height h: Int, window: Int,
-        minContrast: Int64, darkCutPercent: Int64
+    /// Diagnostic hook: the ink fraction a given Sauvola k produces, without
+    /// the paper mask or the closing that follow it in the real pipeline.
+    static func sauvolaFraction(of image: CGImage, k: Double, maxDimension: Int = 2000) -> Double {
+        let size = traceSize(for: image, maxDimension: maxDimension)
+        let w = Int(size.width), h = Int(size.height)
+        var gray = [UInt8](repeating: 0, count: w * h)
+        guard let context = CGContext(
+            data: &gray, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0 }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let ink = sauvolaMask(gray: gray, width: w, height: h,
+                              window: max(15, max(w, h) / 14), k: k)
+        return Double(ink.count { $0 }) / Double(w * h)
+    }
+
+    /// Sauvola's adaptive threshold, `T = m(1 + k(s/R - 1))`, evaluated per
+    /// pixel over a square window.
+    ///
+    /// Both statistics come from summed-area tables — one of the greys, one
+    /// of their squares — so each window costs four lookups regardless of its
+    /// size and the whole pass is O(pixels). Accumulators are Int64: a
+    /// full-resolution sum of squares overflows Int32 many times over.
+    private static func sauvolaMask(
+        gray: [UInt8], width w: Int, height h: Int, window: Int, k: Double
     ) -> [Bool] {
-        var integral = [Int64](repeating: 0, count: (w + 1) * (h + 1))
+        let stride = w + 1
+        var sums = [Int64](repeating: 0, count: stride * (h + 1))
+        var squares = [Int64](repeating: 0, count: stride * (h + 1))
         for y in 0..<h {
             var rowSum: Int64 = 0
-            let row = (y + 1) * (w + 1)
-            let previousRow = y * (w + 1)
+            var rowSquare: Int64 = 0
+            let row = (y + 1) * stride
+            let previous = y * stride
             for x in 0..<w {
-                rowSum += Int64(gray[y * w + x])
-                integral[row + x + 1] = integral[previousRow + x + 1] + rowSum
+                let value = Int64(gray[y * w + x])
+                rowSum += value
+                rowSquare += value * value
+                sums[row + x + 1] = sums[previous + x + 1] + rowSum
+                squares[row + x + 1] = squares[previous + x + 1] + rowSquare
             }
         }
 
         let radius = window / 2
-        let minimum = slidingMinimum(gray, width: w, height: h, radius: radius)
-
         var ink = [Bool](repeating: false, count: w * h)
         for y in 0..<h {
             let y0 = max(0, y - radius), y1 = min(h - 1, y + radius)
-            let top = y0 * (w + 1), bottom = (y1 + 1) * (w + 1)
+            let top = y0 * stride, bottom = (y1 + 1) * stride
             for x in 0..<w {
                 let x0 = max(0, x - radius), x1 = min(w - 1, x + radius)
-                let count = Int64((x1 - x0 + 1) * (y1 - y0 + 1))
-                let sum = integral[bottom + x1 + 1] - integral[top + x1 + 1]
-                    - integral[bottom + x0] + integral[top + x0]
-                let darkest = Int64(minimum[y * w + x])
-                guard sum - darkest * count >= minContrast * count else { continue }
-                if 100 * (Int64(gray[y * w + x]) - darkest) * count
-                    < darkCutPercent * (sum - darkest * count) {
-                    ink[y * w + x] = true
-                }
+                let count = Double((x1 - x0 + 1) * (y1 - y0 + 1))
+                let sum = sums[bottom + x1 + 1] - sums[top + x1 + 1]
+                    - sums[bottom + x0] + sums[top + x0]
+                let square = squares[bottom + x1 + 1] - squares[top + x1 + 1]
+                    - squares[bottom + x0] + squares[top + x0]
+
+                let mean = Double(sum) / count
+                // Clamped: floating error can drive a uniform window's
+                // variance a hair below zero.
+                let variance = max(0, Double(square) / count - mean * mean)
+                let deviation = variance.squareRoot()
+                // s/R is capped at 1 so the bracket can never exceed 1 and
+                // the method stays monotone in k even on a pathological
+                // window whose deviation runs past the nominal range.
+                let normalized = min(1.0, deviation / InkThreshold.dynamicRange)
+                let threshold = mean * (1 + k * (normalized - 1))
+                if Double(gray[y * w + x]) < threshold { ink[y * w + x] = true }
             }
         }
         return ink
     }
 
-    /// Windowed minimum, one dimension at a time with a monotonic deque —
-    /// O(pixels) regardless of the window size.
-    private static func slidingMinimum(
-        _ values: [UInt8], width w: Int, height h: Int, radius: Int
-    ) -> [UInt8] {
-        func pass(_ input: [UInt8], length: Int, lines: Int, stride: Int, lineStride: Int) -> [UInt8] {
-            var output = input
-            var deque = [Int](repeating: 0, count: length)
-            for line in 0..<lines {
-                let base = line * lineStride
-                var head = 0, tail = 0
-                for i in 0..<(length + radius) {
-                    if i < length {
-                        let value = input[base + i * stride]
-                        while tail > head && input[base + deque[tail - 1] * stride] >= value {
-                            tail -= 1
-                        }
-                        deque[tail] = i
-                        tail += 1
-                    }
-                    let out = i - radius
-                    if out >= 0 {
-                        while deque[head] < out - radius { head += 1 }
-                        output[base + out * stride] = input[base + deque[head] * stride]
-                    }
-                }
-            }
-            return output
-        }
-        let rows = pass(values, length: w, lines: h, stride: 1, lineStride: w)
-        return pass(rows, length: h, lines: w, stride: w, lineStride: 1)
-    }
-
-    /// The single dominant bright region — the paper in a handheld photo —
-    /// eroded inward by `margin`, or nil when the frame lacks genuine
-    /// paper-on-darker-surround evidence. Otsu always produces *a* split, so
-    /// activation is gated on what the split actually separated (values
-    /// measured on the fixtures):
-    /// - Class separation: lighting bands across one surface sit close
-    ///   together; paper against a dark table separates by 150+ levels
-    ///   (composites: 177). Below 55 there is only one surface — don't mask.
-    /// - Surround darkness: a page filling the frame puts paper at the
-    ///   border, so the border median lands within a shadow's depth of the
-    ///   paper median (fish-photo: 13 apart, despite a separation of 79
-    ///   because Otsu split its lit band from its shadowed band); a real
-    ///   table sits far below (composites: 191 apart). Under 50 apart the
-    ///   "surround" is the paper itself — don't mask.
     /// When masking is justified, the region is rebuilt at a threshold
     /// relaxed toward the border brightness rather than the hard Otsu cut,
     /// so shadow bands on the paper — brighter than any table that passed

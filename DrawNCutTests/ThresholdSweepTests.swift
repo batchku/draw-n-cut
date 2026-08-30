@@ -26,9 +26,11 @@ struct ThresholdSweepTests {
             .joined(separator: " ")
         print("UNMASKED SWEEP: \(report)")
 
-        for (threshold, count) in counts {
+        // Silence at the very top is now the requirement, not a failure.
+        for (threshold, count) in counts where threshold < 1 {
             #expect(count > 0, "threshold \(threshold) traced nothing — \(report)")
         }
+        #expect(counts.last?.count == 0, "maximum Threshold must trace nothing — \(report)")
     }
 
     /// Every setting must still trace *something*. Fewer lines at the top
@@ -39,9 +41,11 @@ struct ThresholdSweepTests {
         let counts = polylineCounts(in: image)
         let report = counts.map { "\(String(format: "%.1f", $0.threshold)):\($0.count)" }
             .joined(separator: " ")
-        for (threshold, count) in counts {
+        // Silence at the very top is now the requirement, not a failure.
+        for (threshold, count) in counts where threshold < 1 {
             #expect(count > 0, "threshold \(threshold) traced nothing — \(report)")
         }
+        #expect(counts.last?.count == 0, "maximum Threshold must trace nothing — \(report)")
     }
 
     @Test func aScreenPhotoAlsoSurvivesTheTopOfTheRange() throws {
@@ -49,7 +53,11 @@ struct ThresholdSweepTests {
         let counts = polylineCounts(in: image)
         let report = counts.map { "\(String(format: "%.1f", $0.threshold)):\($0.count)" }
             .joined(separator: " ")
-        #expect(try #require(counts.last).count > 0, "the top of the range traced nothing — \(report)")
+        // Everything below the maximum must survive; the maximum must not.
+        #expect(counts.dropLast().allSatisfy { $0.count > 0 },
+                "a setting below maximum traced nothing — \(report)")
+        #expect(try #require(counts.last).count == 0,
+                "maximum Threshold must trace nothing — \(report)")
     }
 }
 
@@ -81,8 +89,9 @@ struct MaskedThresholdSweepTests {
         }
         let line = report.joined(separator: " ")
         print("MASKED SWEEP: \(line)")
-        for (threshold, count) in counts {
+        for (threshold, count) in counts where threshold < 1 {
             #expect(count > 0, "masked threshold \(threshold) traced nothing — \(line)")
         }
+        #expect(counts.last?.1 == 0, "maximum Threshold must trace nothing — \(line)")
     }
 }
