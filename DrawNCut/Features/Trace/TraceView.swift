@@ -120,6 +120,20 @@ struct TraceView: View {
         }
     }
 
+    private var anyToolActive: Bool { pointEditMode || brushMode || penMode || eraserMode }
+
+    /// The one way out, wired to a labelled button rather than only to
+    /// tapping the same unlabelled icon again. Reported from the device:
+    /// "I couldn't get back... all of the sliders became deactivated and I
+    /// don't know how to get out."
+    private func finishEditing(_ session: TraceSession) {
+        pointEditMode = false
+        brushMode = false
+        penMode = false
+        eraserMode = false
+        session.endPointEditingIfUntouched()
+    }
+
     private func controls(_ session: TraceSession) -> some View {
         @Bindable var session = session
         return VStack(spacing: 10) {
@@ -145,6 +159,20 @@ struct TraceView: View {
             }
             .disabled(pointEditMode || brushMode || penMode)
             .opacity(pointEditMode || brushMode || penMode ? 0.35 : 1)
+            if anyToolActive {
+                HStack(spacing: 10) {
+                    Text("Sliders are paused while a tool is on — they redo the trace.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button("Done") { finishEditing(session) }
+                        .font(.caption.bold())
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("finishEditing")
+                }
+            }
             HStack(spacing: 16) {
                 Toggle(isOn: $pointEditMode) {
                     Text("Points")
@@ -154,6 +182,7 @@ struct TraceView: View {
                 .fixedSize()
                 .accessibilityIdentifier("pointEditToggle")
                 .onChange(of: pointEditMode) { _, on in
+                    if !on { session.endPointEditingIfUntouched() }
                     if on {
                         eraserMode = false
                         brushMode = false
@@ -172,6 +201,7 @@ struct TraceView: View {
                 .accessibilityLabel("Undo")
                 Button {
                     brushMode.toggle()
+                    if !brushMode { session.endPointEditingIfUntouched() }
                     if brushMode {
                         eraserMode = false
                         pointEditMode = false
@@ -187,6 +217,7 @@ struct TraceView: View {
                 .accessibilityIdentifier("smoothBrushToggle")
                 Button {
                     penMode.toggle()
+                    if !penMode { session.endPointEditingIfUntouched() }
                     if penMode {
                         eraserMode = false
                         pointEditMode = false
@@ -235,6 +266,7 @@ struct TraceView: View {
                 .frame(width: 76, alignment: .leading)
             Slider(value: value, in: 0...1)
                 .tint(tint)
+                .accessibilityIdentifier("slider-\(label)")
         }
         .padding(.leading, 8)
     }
@@ -245,19 +277,19 @@ struct TraceView: View {
     private var toolDescription: (name: String, help: String)? {
         if pointEditMode {
             return ("Points",
-                    "Drag any control point. Drop an endpoint onto another to join two lines.")
+                    "Drag any control point. Drop an endpoint onto another to join two lines. Done releases the sliders.")
         }
         if brushMode {
             return ("Smoothing brush",
-                    "Sweep along a jagged line to round it out. Scrub back and forth for more.")
+                    "Sweep along a jagged line to round it out. Scrub for more. Done releases the sliders.")
         }
         if penMode {
             return ("Pen",
-                    "Draw over a stretch of a line and your stroke replaces it — the way to simplify a messy run.")
+                    "Draw over a stretch of a line and your stroke replaces it. Done releases the sliders.")
         }
         if eraserMode {
             return ("Eraser lasso",
-                    "Circle part of a shape to delete the points inside it. Tap a line to rub it out.")
+                    "Circle part of a shape to delete the points inside it. Done releases the sliders.")
         }
         return nil
     }

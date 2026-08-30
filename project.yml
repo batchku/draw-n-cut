@@ -18,7 +18,7 @@ settings:
     # Connect rejects a build number it has already seen, so nothing else
     # may touch it. Seeded at 45, the last build uploaded under the previous
     # commit-count scheme.
-    MARKETING_VERSION: "0.3.2"
+    MARKETING_VERSION: "0.3.3"
     CURRENT_PROJECT_VERSION: "52"
   configs:
     # The trace pipeline is heavy numeric Swift; unoptimized it takes tens of

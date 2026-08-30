@@ -40,22 +40,37 @@ struct InkThreshold: Equatable {
     var minContrast: Int64
 
     /// Where the ink cut sits between the window mean (background) and the
-    /// window minimum (the pen), in percent of that span. Fixed: it governs
-    /// how fat a stroke comes out, which is not what "threshold" means, and
-    /// moving it alongside the bar is what made the control incoherent.
-    var darkCutPercent: Int64 { 60 }
+    /// window minimum (the pen), in percent of that span.
+    ///
+    /// This moves *with* the bar, in the same direction. Both answer "how
+    /// easily does a pixel become ink", so pointing them the same way makes
+    /// them reinforce. Running them in opposite directions is what made the
+    /// slider incoherent before, not the fact that both move.
+    ///
+    /// It matters most at the low end. The window minimum is set by the
+    /// darkest thing in the window, so a faint pencil line sharing a window
+    /// with a bold marker stroke sits nowhere near that minimum — lowering
+    /// the contrast bar alone will never admit it, because the bar is not
+    /// what rejects it. Widening the cut is.
+    var darkCutPercent: Int64
 
-    /// - Parameter slider: 0 is the lowest bar — everything short of sensor
-    ///   noise counts, so the most lines. 1 is the highest — only heavy,
-    ///   confident marks. The midpoint is 25 gray levels, the fixed value
-    ///   that predates the slider, so a drawing left at the default traces
-    ///   exactly as it always did.
+    /// - Parameter slider: 0 is the lowest bar — nearly every mark on the
+    ///   page registers, including the faintest. 1 is the highest — only
+    ///   heavy, confident marks. The midpoint is 25 gray levels at a 60% cut,
+    ///   the fixed pair that predates the slider, so a drawing left at the
+    ///   default traces exactly as it always did.
     init(slider: Double) {
         let t = max(0, min(1, slider))
-        let value = t <= 0.5
-            ? 3 + (25.0 - 3) * (t / 0.5)
-            : 25 + (110.0 - 25) * ((t - 0.5) / 0.5)
-        minContrast = Int64(value.rounded())
+        func through(_ low: Double, _ anchor: Double, _ high: Double) -> Int64 {
+            let value = t <= 0.5 ? low + (anchor - low) * (t / 0.5)
+                                 : anchor + (high - anchor) * ((t - 0.5) / 0.5)
+            return Int64(value.rounded())
+        }
+        minContrast = through(3, 25, 110)
+        // 85 is as wide as the cut can go before the paper beside a stroke
+        // starts counting too and neighbouring lines fuse into a blob; past
+        // that the drawing collapses rather than densifies.
+        darkCutPercent = through(85, 60, 40)
     }
 }
 

@@ -573,6 +573,18 @@ final class TraceSession {
     /// like any others. No-op when already editing. While frozen, the live
     /// `cutOutlines` are neither drawn nor exported (their frozen copies
     /// are), so slider-derived outlines can't double up.
+    /// Leaves the frozen-geometry world when nothing was actually changed.
+    ///
+    /// Turning on a tool freezes the trace so edits have something stable to
+    /// act on, and any later slider move throws that frozen copy away. If the
+    /// user only poked the tool and backed out, the copy is identical to the
+    /// trace and keeping it makes the sliders quietly destructive for no
+    /// reason. Dropping it puts them back exactly where they were.
+    func endPointEditingIfUntouched() {
+        guard editUndoStack.isEmpty, pendingUndoSnapshot == nil else { return }
+        editedPaths = nil
+    }
+
     func beginPointEditing() {
         guard editedPaths == nil else { return }
         // Promoted sources are hidden from `visible`, so everything visible

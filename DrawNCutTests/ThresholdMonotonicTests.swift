@@ -113,10 +113,41 @@ struct ThresholdMonotonicTests {
         #expect(InkThreshold(slider: 0).minContrast < InkThreshold(slider: 1).minContrast)
     }
 
-    /// Stroke fatness is no longer tied to the slider — that coupling is what
-    /// made the two ends look equally detailed while showing different lines.
-    @Test func strokeFatnessNoLongerMovesWithTheSlider() {
-        let values = Set(Self.steps.map { InkThreshold(slider: $0).darkCutPercent })
-        #expect(values.count == 1, "the ink cut still varies with Threshold: \(values)")
+    /// Both knobs move, and they must move the *same* way. Pointing them in
+    /// opposite directions is what made the slider incoherent — it was never
+    /// the fact that both moved. The cut has to widen as the bar drops, or a
+    /// faint line sharing a window with a bold stroke can never register
+    /// however far the bar falls.
+    @Test func theCutWidensAsTheBarDrops() {
+        var previousBar = Int64.min
+        var previousCut = Int64.max
+        for step in Self.steps {
+            let gate = InkThreshold(slider: step)
+            #expect(gate.minContrast >= previousBar, "the bar dipped at \(step)")
+            #expect(gate.darkCutPercent <= previousCut, "the cut widened at \(step)")
+            previousBar = gate.minContrast
+            previousCut = gate.darkCutPercent
+        }
+    }
+
+    /// Past about 85% the cut starts claiming the paper beside a stroke, and
+    /// neighbouring lines fuse into a blob instead of resolving — the drawing
+    /// collapses rather than densifies. That was the "Nothing to Trace"
+    /// failure at full Threshold in build 49.
+    @Test func theCutStaysBelowTheFusingPoint() {
+        #expect(InkThreshold(slider: 0).darkCutPercent <= 85)
+    }
+
+    /// The point of the low end: it has to be dramatically denser than the
+    /// default, not slightly.
+    @Test func theLowestBarIsFarDenserThanTheDefault() throws {
+        let image = try photo()
+        let dense = TraceEngine.trace(image: image, detail: 0.7, threshold: 0)?
+            .elements.reduce(0) { $0 + $1.polylines.count } ?? 0
+        let normal = TraceEngine.trace(
+            image: image, detail: 0.7, threshold: BinaryBitmap.defaultThreshold)?
+            .elements.reduce(0) { $0 + $1.polylines.count } ?? 0
+        #expect(dense > 5 * max(1, normal),
+                "the bottom of the slider is not dense: \(normal) → \(dense)")
     }
 }
