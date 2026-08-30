@@ -172,7 +172,7 @@ final class TraceSession {
     // MARK: - Loading
 
     func load() async {
-        let url = store.originalImageURL(for: project)
+        let url = store.pipelineImageURL(for: project)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return }
         // Bounded thumbnail decode: never materialize the full-resolution
         // photo in memory — an oversized stored image (or a future 48MP

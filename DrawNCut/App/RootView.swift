@@ -3,6 +3,7 @@ import SwiftUI
 /// The screens a drawing moves through on its way from photo to DXF.
 enum Route: Hashable {
     case capture
+    case calibrate(projectID: UUID)
     case refineMask(projectID: UUID)
     case trace(projectID: UUID)
     case export(projectID: UUID)
@@ -23,6 +24,8 @@ struct RootView: View {
                     switch route {
                     case .capture:
                         CaptureView(path: $path)
+                    case .calibrate(let projectID):
+                        CalibrateView(path: $path, projectID: projectID)
                     case .refineMask(let projectID):
                         RefineMaskView(path: $path, projectID: projectID)
                     case .trace(let projectID):
@@ -41,6 +44,7 @@ struct RootView: View {
     private func describe(_ route: Route) -> String {
         switch route {
         case .capture: "capture"
+        case .calibrate: "calibrate"
         case .refineMask: "refineMask"
         case .trace: "trace"
         case .export: "export"

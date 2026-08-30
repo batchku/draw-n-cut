@@ -142,6 +142,16 @@ final class ProjectStore {
         directory(for: project).appending(path: "rectified.png")
     }
 
+    /// The image every later stage works from: the coin-corrected one when
+    /// calibration produced it, the photo as shot otherwise. Segmentation,
+    /// tracing and thumbnails all read this so they cannot disagree about
+    /// which pixels the drawing lives in.
+    func pipelineImageURL(for project: DrawingProject) -> URL {
+        let rectified = rectifiedImageURL(for: project)
+        return FileManager.default.fileExists(atPath: rectified.path)
+            ? rectified : originalImageURL(for: project)
+    }
+
     /// The library row's picture: the photo with its traced lines over it.
     /// Rewritten after each trace, so it always shows the current state.
     func thumbnailURL(for project: DrawingProject) -> URL {
@@ -161,11 +171,11 @@ final class ProjectStore {
     func thumbnailJobs() -> [ThumbnailJob] {
         projects.compactMap { project in
             let destination = thumbnailURL(for: project)
-            guard FileManager.default.fileExists(atPath: originalImageURL(for: project).path),
+            guard FileManager.default.fileExists(atPath: pipelineImageURL(for: project).path),
                   ThumbnailBuilder.isStale(thumbnail: destination, project: project.updatedAt)
             else { return nil }
             return ThumbnailJob(
-                photoURL: originalImageURL(for: project),
+                photoURL: pipelineImageURL(for: project),
                 maskURL: maskURL(for: project),
                 versionURL: project.activeTraceVersion.map {
                     tracePathsURL(for: $0, in: project)

@@ -68,7 +68,7 @@ final class RefineMaskSession {
     }
 
     func load() async {
-        guard let cgImage = Self.decodeImage(at: store.originalImageURL(for: project)) else {
+        guard let cgImage = Self.decodeImage(at: store.pipelineImageURL(for: project)) else {
             phase = .failed("Couldn't load this project's photo.")
             return
         }

@@ -84,7 +84,14 @@ struct CaptureView: View {
             }
             let project = try store.create(title: "Drawing \(store.projects.count + 1)")
             try jpeg.write(to: store.originalImageURL(for: project), options: .atomic)
-            path = [.refineMask(projectID: project.id)]
+            // Only stop to offer straightening when there is actually a coin
+            // to straighten by: someone who never uses one must not gain a
+            // screen and a tap for nothing.
+            if let cgImage = normalized.cgImage, CoinDetector.detect(in: cgImage) != nil {
+                path = [.calibrate(projectID: project.id)]
+            } else {
+                path = [.refineMask(projectID: project.id)]
+            }
         } catch {
             importError = "Couldn't save the photo: \(error.localizedDescription)"
         }
