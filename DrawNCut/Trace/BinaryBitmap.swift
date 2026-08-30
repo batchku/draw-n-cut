@@ -116,7 +116,8 @@ struct BinaryBitmap {
     /// doesn't improve past that, and every later stage is O(pixels).
     init?(cgImage: CGImage, maxDimension: Int = 2000, threshold: Double = Self.defaultThreshold) {
         var report: BinarizationReport? = nil
-        self.init(cgImage: cgImage, maxDimension: maxDimension, threshold: threshold, report: &report)
+        self.init(cgImage: cgImage, maxDimension: maxDimension, threshold: threshold,
+                  report: &report)
     }
 
     /// Same as `init?(cgImage:maxDimension:)`, but also fills `report` with
@@ -124,7 +125,8 @@ struct BinaryBitmap {
     /// - Parameter threshold: the user-facing Threshold slider, 0...1.
     ///   `defaultThreshold` reproduces the fixed behavior this replaced.
     init?(cgImage: CGImage, maxDimension: Int = 2000,
-          threshold: Double = Self.defaultThreshold, report: inout BinarizationReport?) {
+          threshold: Double = Self.defaultThreshold,
+          report: inout BinarizationReport?) {
         let size = Self.traceSize(for: cgImage, maxDimension: maxDimension)
         let w = Int(size.width)
         let h = Int(size.height)

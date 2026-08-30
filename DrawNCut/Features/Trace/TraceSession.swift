@@ -275,8 +275,12 @@ final class TraceSession {
                     image: image, mask: mask, eraseMask: eraseMask,
                     detail: detail, smoothness: smoothness,
                     threshold: threshold) else { return nil }
-                let coincident = Self.coincidentTargets(in: traced, outlines: outlines)
-                return (traced, coincident)
+                // Trim, rather than hide: a line that runs along the cut and
+                // then heads into the drawing keeps its interior branch. See
+                // OutlineTrim for why hiding whole polylines emptied a
+                // well-segmented drawing of all its detail.
+                let trimmed = Self.trimmingOutlineOverlap(traced, outlines: outlines)
+                return (trimmed, [])
             }.value
             guard !Task.isCancelled, let self, let (traced, coincident) = computed else { return }
             self.result = traced
@@ -306,6 +310,40 @@ final class TraceSession {
             self.pendingUndoSnapshot = nil
             self.logTraceOutcome(traced)
         }
+    }
+
+    /// Rewrites each traced element's polylines so no stretch of them lies on
+    /// the cut outline. Done here, on the result itself, so every later stage
+    /// — hit testing, erasing, promotion, freezing, export — sees exactly the
+    /// geometry the canvas draws, instead of a full-length polyline that is
+    /// only partly shown.
+    nonisolated private static func trimmingOutlineOverlap(
+        _ result: TraceResult, outlines: [Polyline]
+    ) -> TraceResult {
+        let edges = OutlineTrim.edges(of: outlines)
+        guard !edges.isEmpty else { return result }
+        var result = result
+        // Tolerance for *deleting* line, which is a different job from the
+        // snapping tolerance this reused at first. It only has to cover the
+        // width the cut is drawn at plus a little slack; anything wider eats
+        // interior detail that merely passes near the edge. Relative to the
+        // image so it behaves the same at any resolution.
+        let diagonal = (result.imageSize.width * result.imageSize.width
+                        + result.imageSize.height * result.imageSize.height).squareRoot()
+        for index in result.elements.indices {
+            let distance = max(3.0, min(0.0035 * diagonal,
+                                        1.2 * result.elements[index].estimatedStrokeWidth))
+            let trimmed = result.elements[index].polylines.flatMap {
+                OutlineTrim.trimmed($0, awayFrom: edges, distance: distance)
+            }
+            result.elements[index].polylines = trimmed
+            result.elements[index].totalLength = trimmed.reduce(0) { $0 + $1.length }
+        }
+        // An element whose every line lay on the cut has nothing left to
+        // engrave; dropping it keeps indices meaningful rather than leaving
+        // empty shells that hit tests would still walk.
+        result.elements.removeAll { $0.polylines.isEmpty }
+        return result
     }
 
     /// The mask boundary as closed loops (regions + holes), at a given
@@ -594,6 +632,12 @@ final class TraceSession {
 
     /// True when the undo button should be enabled: an edit gesture or an
     /// erasure is there to take back.
+    /// How many traced lines are hidden for duplicating the cut outline.
+    /// Exposed for diagnosis: "the trace found nothing" and "the trace found
+    /// it and then hid it" look identical from outside and need different
+    /// fixes.
+    var outlineTargetCountForDiagnostics: Int { outlineTargets.count }
+
     var canUndo: Bool {
         (editedPaths != nil && !editUndoStack.isEmpty) || !eraseShapes.isEmpty
     }
