@@ -19,7 +19,7 @@ The points most likely to catch you out:
   closed to any app that sends children's photos or drawings to a third party.
 - The Firebase project is `storai-b7b42`. Its id is permanent and must not be
   find-and-replaced. `authDomain` is `kidwiz.ai`.
-- The published support address is `support@kidwiz.ai`.
+- The published support address is `hi@kidwiz.ai`.
 - The Apple team is `V9DBGV72NL` (IRL Labs LLC).
 
 Learned something true of more than one Kidwiz app? Record it there, not here:
