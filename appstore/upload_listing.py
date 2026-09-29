@@ -114,8 +114,11 @@ def main() -> int:
         relationships["secondaryCategory"] = {"data": {"type": "appCategories", "id": listing["secondary_category"]}}
     patch(dry, f"appInfos/{info['id']}", {"data": {
         "type": "appInfos", "id": info["id"],
-        "attributes": {"contentRightsDeclaration": listing["content_rights"]},
         "relationships": relationships}})
+    # Content rights is an attribute of the app, not of its app info.
+    patch(dry, f"apps/{listing['app_id']}", {"data": {
+        "type": "apps", "id": listing["app_id"],
+        "attributes": {"contentRightsDeclaration": listing["content_rights"]}}})
 
     # -- age rating ----------------------------------------------------------
     decl = asc.get(f"appInfos/{info['id']}/ageRatingDeclaration")["data"]
@@ -165,7 +168,7 @@ def main() -> int:
               "| keywords chars:", len(loc.get("keywords") or ""),
               "| support:", loc.get("supportUrl"),
               "| categories:", [c["id"] for c in info_full.get("included", [])],
-              "| rights:", info_full["data"]["attributes"].get("contentRightsDeclaration"),
+              "| rights:", asc.get(f"apps/{listing['app_id']}")["data"]["attributes"].get("contentRightsDeclaration"),
               "| age:", info_full["data"]["attributes"].get("appStoreAgeRating"))
     return 0
 
