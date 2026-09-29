@@ -18,7 +18,7 @@ settings:
     # Connect rejects a build number it has already seen, so nothing else
     # may touch it. Seeded at 45, the last build uploaded under the previous
     # commit-count scheme.
-    MARKETING_VERSION: "0.4.1"
+    MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "55"
   configs:
     # The trace pipeline is heavy numeric Swift; unoptimized it takes tens of
@@ -104,6 +104,14 @@ targets:
     platform: iOS
     sources:
       - DrawNCutUITests
+      # A real photo and its subject mask, for the App Store screenshot run
+      # (StoreScreenshotTests): the simulator's segmentation returns empty
+      # masks, so the cut line has to come from a mask made on a device.
+      - path: Fixtures
+        buildPhase: resources
+        includes:
+          - "fish-circle-shadow-photo.jpg"
+          - "fish-circle-shadow-mask.png"
     dependencies:
       - target: DrawNCut
     settings:

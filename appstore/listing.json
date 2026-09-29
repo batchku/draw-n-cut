@@ -1,0 +1,28 @@
+{
+  "_comment": "The App Store listing as uploaded through scripts/lib/asc.py (see appstore/README.md). Edit here, then run the upload; App Store Connect is a copy of this file, never the other way round.",
+  "app_id": "6801907664",
+  "bundle_id": "ai.kidwiz.drawncut",
+  "locale": "en-US",
+  "name": "Draw'n'Cut",
+  "subtitle": "A drawing becomes a laser cut",
+  "primary_category": "GRAPHICS_AND_DESIGN",
+  "secondary_category": "UTILITIES",
+  "content_rights": "DOES_NOT_USE_THIRD_PARTY_CONTENT",
+  "age_rating": "4+ (every questionnaire item answered none/false)",
+  "support_url": "https://kidwiz.ai/drawncut/support",
+  "privacy_policy_url": "https://kidwiz.ai/drawncut/privacy",
+  "promotional_text": "Photograph a drawing, tap the figure, and take home a DXF with a cut line around it and engrave lines inside. Everything runs on the phone.",
+  "keywords": "laser cutter,laser,dxf,vector,trace,drawing,kids,craft,engrave,maker,cut,outline",
+  "description": "Draw'n'Cut turns a phone photo of a hand-drawn picture into a file a laser cutter can use.\n\nPhotograph the drawing, or bring one in from your photo library. Tap the figure you want cut out and the app finds its edge. The pen strokes inside become engrave lines and the outline becomes the cut line. Adjust three sliders until it looks right, tap any line to make it a cut instead of an engrave, and export a DXF sized to the width you want. Open that file in your cutter's software and cut.\n\nThe result is the drawing itself, in wood or acrylic or cardboard: a kid's fish with its own scales scored into the surface, a robot with the buttons still on its chest.\n\nWHAT IT DOES WITH A PHOTO\n\nThe tracing is built for handheld photos of paper, not scans. It copes with uneven light, a dark table under the page, faint pencil, and drawings photographed off a screen. Filled shapes such as eyes trace as the shape that was drawn. A photo that traces to nothing tells you so rather than handing you an empty file.\n\nPut a coin on the page before you photograph it and the app measures the drawing, so an export can come out at its real size.\n\nTHE FILE\n\nDXF (R12) with two layers, CUT in red and ENGRAVE in blue, in millimetres. It goes out through the standard share sheet: save to Files, AirDrop to a computer, or send it to yourself. Laser cutter software generally opens DXF directly.\n\nWHAT YOU NEED TO KNOW\n\nEverything runs on the device. There is no account, no sign-in, and no network connection: the photograph and the file never leave the phone. The subject selection uses an on-device segmentation model.\n\nA laser cutter is a tool for grown-ups. The app makes the file; a grown-up runs the machine.\n\nQuestions, or a drawing you cut that you want to show us: hi@kidwiz.ai",
+  "review_contact": {
+    "first_name": "Ali",
+    "last_name": "Momeni",
+    "email": "hi@kidwiz.ai",
+    "phone": "copied from the Story listing's review detail at upload time; not stored here"
+  },
+  "review_notes": "PURPOSE AND TARGET AUDIENCE\n\nDraw'n'Cut turns a photograph of a hand-drawn picture into a DXF vector file for a laser cutter: a closed cut line around the figure and engrave lines for the marks inside it. It is a maker tool for families. Rated 4+; the account holder and the person running a laser cutter is an adult. It is not in the Kids Category.\n\nSETUP AND ACCESS\n\nNo account, no sign-in, no demo credentials, no network access. Launch the app and it is ready.\n\nHOW TO TRY IT WITHOUT A DRAWING TO HAND\n\n1. On the empty library screen tap New Drawing, then choose the photo library instead of the camera and pick any photo of a drawing or sketch on paper (a child's drawing, a doodle, a cartoon on a page). A dark line drawing on light paper gives the clearest result.\n2. If a coin is visible on the page the app offers to measure it; otherwise skip that step. Tap the figure once to select it. A mask appears over it; plus and minus markers refine it. Continue.\n3. The trace screen shows the cut line in red and engrave lines in blue. Move the Outline, Lines and Smooth sliders and the trace updates live. Tap a blue line to make it a cut line.\n4. Tap Export, choose a width, and the share sheet opens with a .dxf file. Save it to Files to inspect it; any DXF viewer or laser software opens it.\n\nThe camera path works the same way with a live photo of a drawing.\n\nPERMISSIONS\n\nCamera, to photograph a drawing. Photo library, to import one. Both are requested when first used and both are optional (either path works alone).\n\nEXTERNAL SERVICES\n\nNone. Segmentation (SAM 2.1 Small, Apple Core ML) and tracing run on the device. No advertising SDK, no analytics SDK, no payment processor, no accounts, no data collected.\n\nREGIONAL DIFFERENCES\n\nNone.\n\nREGULATED INDUSTRY OR PROTECTED MATERIAL\n\nNot applicable. The app ships no third-party content; the output is a vector trace of the user's own photograph.\n\nCONTENT\n\nThere is no user-generated content shared with anyone: files leave the phone only through the iOS share sheet at the user's own choice.",
+  "screenshots": {
+    "APP_IPHONE_65": "appstore/screenshots/iphone-65/*.jpg (1284x2778)",
+    "APP_IPAD_PRO_3GEN_129": "appstore/screenshots/ipad-13/*.jpg (2064x2752)"
+  }
+}

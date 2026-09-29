@@ -20,3 +20,10 @@ build-archive/
 
 # Deploy credentials (identifiers plus a local keychain password)
 .deploy.env
+
+# Screenshot run scratch (the JPEGs in appstore/screenshots/<size>/ are kept)
+appstore/screenshots/raw/
+appstore/screenshots/export-*/
+DerivedData-Shots/
+DerivedData*/
+__pycache__/

@@ -57,7 +57,8 @@ struct RootView: View {
     /// `DEMO_IMAGE=bundled:<name>` loads `<name>.jpg` from the app bundle,
     /// which works on a physical device where host paths don't exist.
     /// Adding `DEMO_IMAGE_REFINE=1` stops at the refine-mask screen instead,
-    /// matching the real capture flow.
+    /// matching the real capture flow. `DEMO_MASK=<path>` installs a mask PNG
+    /// (trace space, as `MaskPNG` writes it) beside the photo.
     private func openDemoImageIfRequested() {
         #if DEBUG
         guard let demoPath = ProcessInfo.processInfo.environment["DEMO_IMAGE"],
@@ -76,6 +77,13 @@ struct RootView: View {
             }
             let project = try store.create(title: "Demo Drawing")
             try data.write(to: store.originalImageURL(for: project), options: .atomic)
+            // `DEMO_MASK=<path>` seeds the subject mask as well, so the trace
+            // screen shows a cut line where the simulator's segmentation
+            // (which produces empty masks) cannot. Used for the store shots.
+            if let maskPath = ProcessInfo.processInfo.environment["DEMO_MASK"] {
+                try FileManager.default.copyItem(at: URL(filePath: maskPath),
+                                                 to: store.maskURL(for: project))
+            }
             if ProcessInfo.processInfo.environment["DEMO_IMAGE_REFINE"] == "1" {
                 path = [.refineMask(projectID: project.id)]
             } else {
