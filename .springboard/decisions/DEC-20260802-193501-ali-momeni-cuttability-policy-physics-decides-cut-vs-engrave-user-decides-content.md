@@ -2,11 +2,11 @@
 schema_version: 1
 type: decision
 title: 'Cuttability policy: physics decides cut vs engrave, user decides content'
-status: proposed
+status: accepted
 authorship_mode: agent
 record_authority: proposed
 rewrite_policy: agent_revisable
-status_changed_at: 2026-08-02T19:35:01Z
+status_changed_at: 2026-10-03T21:39:31Z
 related_workitems: []
 supersedes: []
 id: DEC-20260802-193501-ali-momeni
